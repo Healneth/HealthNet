@@ -1,12 +1,13 @@
 import { useState } from 'react'
-import { Heart, Thermometer, AlertTriangle, Battery, ChevronDown, ChevronUp, Wifi, FileText } from 'lucide-react'
+import { Heart, Thermometer, AlertTriangle, Battery, ChevronDown, ChevronUp, Wifi, FileText, Bed, HeartHandshake } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import type { DeviceState } from '../types'
-import { THRESHOLDS } from '../types'
+import { THRESHOLDS, ROLE_PERMISSIONS } from '../types'
 import HeartRateChart from './charts/HeartRateChart'
 import TempChart from './charts/TempChart'
 import { useDeviceStore } from '../store/deviceStore'
+import { useAuth } from '../hooks/useAuth'
 import DeviceReportTemplate from './DeviceReportTemplate'
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
@@ -38,6 +39,11 @@ function BatteryIcon({ level }: { level: number }) {
 }
 
 export default function DeviceCard({ device, expanded, onToggleExpanded }: Props) {
+  const { user } = useAuth()
+  const permissions = user?.role ? ROLE_PERMISSIONS[user.role] : null
+  const canAttendAlerts = permissions?.canAttendAlerts ?? false
+  const canGenerateReports = permissions?.canGenerateReports ?? false
+
   const acknowledgeAlert = useDeviceStore(s => s.acknowledgeAlert)
   const { latest, history, alerts } = device
   const unread = alerts.filter(a => !a.acknowledged)
@@ -127,23 +133,41 @@ export default function DeviceCard({ device, expanded, onToggleExpanded }: Props
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <h3 className="font-bold text-slate-800 dark:text-white text-base">{device.patientName}</h3>
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                downloadPdf()
-              }}
-              disabled={generatingPdf}
-              title="Descargar Reporte Médico PDF"
-              className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-850 transition-colors flex items-center justify-center ml-1"
-            >
-              {generatingPdf ? (
-                <span className="w-3.5 h-3.5 border-2 border-hn-600 border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <FileText size={15} />
-              )}
-            </button>
+            {canGenerateReports && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  downloadPdf()
+                }}
+                disabled={generatingPdf}
+                title="Descargar Reporte Médico PDF"
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-850 transition-colors flex items-center justify-center ml-1"
+              >
+                {generatingPdf ? (
+                  <span className="w-3.5 h-3.5 border-2 border-hn-600 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <FileText size={15} />
+                )}
+              </button>
+            )}
           </div>
           <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{device.deviceId} · {lastSeen}</p>
+          <div className="flex flex-wrap items-center gap-1.5 mt-2">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+              <Bed size={11} className="text-hn-600 dark:text-hn-400" />
+              <span>{device.profile?.roomNumber || 'Habitación'} · {device.profile?.floor || 'Piso 1'}</span>
+            </span>
+            {device.profile?.assignedNurseName ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800/60">
+                <HeartHandshake size={11} className="text-emerald-600 dark:text-emerald-400" />
+                <span>{device.profile.assignedNurseName}</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400 border border-amber-200 dark:border-amber-800/40">
+                Sin enfermero
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex flex-col items-end gap-1">
           <BatteryIcon level={latest.batteryLevel} />
@@ -216,12 +240,18 @@ export default function DeviceCard({ device, expanded, onToggleExpanded }: Props
                 <AlertTriangle size={12} className="text-amber-500" />
                 <span className="text-xs text-amber-700 dark:text-amber-400 font-semibold">{alert.message}</span>
               </div>
-              <button
-                onClick={() => acknowledgeAlert(alert.id)}
-                className="text-[10px] text-amber-600 hover:text-amber-800 dark:text-amber-400 font-bold ml-2 whitespace-nowrap"
-              >
-                OK
-              </button>
+              {canAttendAlerts ? (
+                <button
+                  onClick={() => acknowledgeAlert(alert.id)}
+                  className="text-[10px] text-amber-600 hover:text-amber-800 dark:text-amber-400 font-bold ml-2 whitespace-nowrap"
+                >
+                  OK
+                </button>
+              ) : (
+                <span className="text-[10px] text-amber-600/70 dark:text-amber-400/70 font-medium ml-2 whitespace-nowrap">
+                  Pendiente
+                </span>
+              )}
             </div>
           ))}
         </div>

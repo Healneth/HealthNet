@@ -180,7 +180,7 @@ export default function DeviceReportTemplate({ device }: Props) {
               <AlertTriangle size={24} className="text-rose-600 flex-shrink-0 mt-0.5" />
               <div>
                 <h3 className="text-rose-800 font-extrabold text-sm mb-0.5">
-                  ⚠ ALERTA MÉDICA: Patrón Crítico de Caídas Detectado
+                  ALERTA MÉDICA: Patrón Crítico de Caídas Detectado
                 </h3>
                 <p className="text-rose-700 text-xs leading-normal">
                   El sistema identificó un comportamiento de alto riesgo: el paciente sufrió{' '}

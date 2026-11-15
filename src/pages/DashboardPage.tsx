@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import {
   Activity, Heart, Thermometer, AlertTriangle,
-  Users, Wifi, WifiOff, BellOff,
+  Users, Wifi, WifiOff, BellOff, ArrowLeft, Stethoscope,
 } from 'lucide-react'
 import { useDeviceStore } from '../store/deviceStore'
+import { useAuth } from '../hooks/useAuth'
 import DeviceCard from '../components/DeviceCard'
 import { THRESHOLDS } from '../types'
 
@@ -41,9 +42,18 @@ function StatCard({
 }
 
 export default function DashboardPage() {
-  const devices       = useDeviceStore(s => Object.values(s.devices))
-  const alerts        = useDeviceStore(s => s.alerts)
+  const { user } = useAuth()
+  const rawDevices    = useDeviceStore(s => Object.values(s.devices))
+  const rawAlerts     = useDeviceStore(s => s.alerts)
   const clearAlerts   = useDeviceStore(s => s.clearAlerts)
+
+  // Acceso general: Todos los enfermeros pueden consultar la información de todos los pacientes en Dashboard
+  const isNurse = user?.role === 'nurse'
+  const nonArchivedDevices = rawDevices.filter(d => !d.isArchived && d.profile?.isArchived !== true)
+  const devices = nonArchivedDevices
+
+  // Todas las alertas generadas son visibles independientemente del rol para máxima seguridad
+  const alerts = rawAlerts
 
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null)
 
@@ -77,15 +87,40 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {/* Banner de Turno para Enfermeros */}
+      {isNurse && (
+        <div className="bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500 text-white flex items-center justify-center font-black shadow-sm flex-shrink-0">
+              <Stethoscope size={20} />
+            </div>
+            <div>
+              <p className="text-xs font-black text-emerald-900 dark:text-emerald-300 uppercase tracking-wider">
+                Turno de Enfermería Activo · {user?.fullName || 'Personal Asistencial'}
+              </p>
+              <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">
+                Consulta general de pacientes ({devices.length}) y alertas clínicas del centro asistencial en tiempo real.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-800/40 dark:text-emerald-300 self-start sm:self-auto">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            Supervisión General Activa
+          </span>
+        </div>
+      )}
+
       {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-black text-slate-800 dark:text-white">Dashboard</h1>
+          <h1 className="text-xl font-black text-slate-800 dark:text-white">
+            Dashboard General
+          </h1>
           <p className="text-xs font-semibold text-slate-400 dark:text-slate-500 mt-0.5 uppercase tracking-wide">
             Monitoreo en tiempo real · AWS IoT Core
           </p>
         </div>
-        {unreadAlerts > 0 && (
+        {unreadAlerts > 0 && isNurse && (
           <button
             onClick={() => clearAlerts()}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-slate-200 dark:bg-slate-900 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold hover:bg-slate-50 dark:hover:bg-slate-850 transition-all active:scale-95 shadow-sm"
@@ -133,14 +168,16 @@ export default function DashboardPage() {
         <div className="flex items-center gap-3 bg-red-50 border border-red-300 dark:bg-red-500/10 dark:border-red-500/20 rounded-2xl px-5 py-3.5">
           <AlertTriangle size={18} className="text-red-500 flex-shrink-0 animate-pulse" />
           <p className="text-red-700 dark:text-red-400 font-bold text-xs flex-1">
-            ⚠ {fallAlerts} caída(s) detectada(s) — revisa las tarjetas resaltadas
+            {fallAlerts} caída(s) detectada(s) — revisa las tarjetas resaltadas
           </p>
-          <button
-            onClick={() => clearAlerts()}
-            className="text-xs text-red-500 hover:text-red-700 font-bold"
-          >
-            Descartar
-          </button>
+          {isNurse && (
+            <button
+              onClick={() => clearAlerts()}
+              className="text-xs text-red-500 hover:text-red-700 font-bold"
+            >
+              Descartar
+            </button>
+          )}
         </div>
       )}
 
@@ -150,24 +187,31 @@ export default function DashboardPage() {
           <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
             <Activity size={28} className="text-slate-400" />
           </div>
-          <h2 className="text-slate-800 dark:text-slate-200 font-bold text-base mb-1">Sin dispositivos conectados</h2>
+          <h2 className="text-slate-800 dark:text-slate-200 font-bold text-base mb-1">
+            Sin dispositivos conectados
+          </h2>
           <p className="text-slate-400 text-xs max-w-xs leading-normal">
-            Ve al <span className="font-semibold text-hn-700">Simulador</span> para lanzar dispositivos
-            virtuales, o conecta tu ESP32 configurado con las credenciales AWS.
+            {isNurse
+              ? 'No hay dispositivos activos conectados para monitorear actualmente.'
+              : 'Ve al Simulador para lanzar dispositivos virtuales, o conecta tu ESP32 configurado con las credenciales AWS.'}
           </p>
-          <div className="mt-6 flex items-center gap-2 text-slate-400 text-xs">
-            <WifiOff size={14} className="animate-pulse" />
-            <span>Esperando telemetría MQTT…</span>
-          </div>
+          {!isNurse && (
+            <div className="mt-6 flex items-center gap-2 text-slate-400 text-xs">
+              <WifiOff size={14} className="animate-pulse" />
+              <span>Esperando telemetría MQTT…</span>
+            </div>
+          )}
         </div>
       ) : expandedDeviceId ? (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <button
               onClick={() => setExpandedDeviceId(null)}
-              className="text-xs text-slate-600 hover:text-slate-850 dark:text-slate-300 dark:hover:text-white font-bold bg-white border border-slate-200 dark:bg-slate-900 dark:border-slate-800 rounded-xl px-4 py-2 shadow-sm transition-all flex items-center gap-1.5 active:scale-95"
+              className="p-2.5 text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white bg-white border border-slate-200 dark:bg-slate-900 dark:border-slate-800 rounded-xl shadow-sm transition-all flex items-center justify-center active:scale-95 cursor-pointer"
+              title="Volver"
+              aria-label="Volver"
             >
-              <span>← Volver al listado de dispositivos</span>
+              <ArrowLeft size={18} />
             </button>
           </div>
           <div className="w-full">

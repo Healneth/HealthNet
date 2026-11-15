@@ -121,7 +121,7 @@ export default function Navbar() {
               <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl border border-hn-200 shadow-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="px-4 py-3 border-b border-hn-100 flex items-center justify-between bg-hn-50">
                   <h3 className="text-xs font-extrabold text-hn-800">Alertas Activas</h3>
-                  {unreadAlertsCount > 0 && (
+                  {unreadAlertsCount > 0 && user?.role === 'nurse' && (
                     <button
                       onClick={() => {
                         clearAlerts()
@@ -158,13 +158,15 @@ export default function Navbar() {
                             <p className="text-xs text-hn-600 mt-0.5 font-medium leading-normal">{alert.message}</p>
                             <p className="text-[9px] text-hn-400 mt-1 font-mono">ID: {alert.deviceId}</p>
                           </div>
-                          <button
-                            onClick={() => acknowledgeAlert(alert.id)}
-                            className="p-1 rounded hover:bg-hn-200 text-hn-400 hover:text-hn-700 transition-colors flex-shrink-0"
-                            title="Marcar como leída"
-                          >
-                            <X size={13} />
-                          </button>
+                          {user?.role === 'nurse' && (
+                            <button
+                              onClick={() => acknowledgeAlert(alert.id)}
+                              className="p-1 rounded hover:bg-hn-200 text-hn-400 hover:text-hn-700 transition-colors flex-shrink-0"
+                              title="Marcar como atendida"
+                            >
+                              <X size={13} />
+                            </button>
+                          )}
                         </div>
                       )
                     })

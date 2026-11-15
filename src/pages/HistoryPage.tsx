@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useDeviceStore } from '../store/deviceStore'
+import { useAuth } from '../hooks/useAuth'
 import {
   Calendar, FileDown, Search, Activity, Heart, Thermometer,
   TrendingUp, ArrowLeftRight
@@ -16,7 +17,15 @@ interface HistoricalData {
 }
 
 export default function HistoryPage() {
-  const devices = useDeviceStore(s => Object.values(s.devices))
+  const { user } = useAuth()
+  const rawDevices = useDeviceStore(s => Object.values(s.devices))
+  const isNurse = user?.role === 'nurse'
+
+  // Consulta general: Todos los enfermeros pueden consultar el historial de todos los pacientes
+  const devices = useMemo(() => {
+    return rawDevices
+  }, [rawDevices])
+
   const [selectedId, setSelectedId] = useState<string>(devices[0]?.deviceId || '')
   const [range, setRange] = useState<'hoy' | 'semana' | 'mes'>('hoy')
 

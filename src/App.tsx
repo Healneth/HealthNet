@@ -10,15 +10,20 @@ import MonitoringPage from './pages/MonitoringPage'
 import AlertsPage from './pages/AlertsPage'
 import HistoryPage from './pages/HistoryPage'
 import ProfilePage from './pages/ProfilePage'
+import UsersManagementPage from './pages/UsersManagementPage'
 import { iotService } from './services/iot'
 import { getCredentials } from './services/auth'
 import { useDeviceStore } from './store/deviceStore'
 
 function Layout({ children }: { children: React.ReactNode }) {
+  const sidebarCollapsed = useDeviceStore(s => s.sidebarCollapsed)
+
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-300">
       <Sidebar />
-      <div className="flex-1 lg:pl-64 min-w-0 flex flex-col">
+      <div className={`flex-1 min-w-0 flex flex-col transition-all duration-300 ease-in-out ${
+        sidebarCollapsed ? 'lg:pl-20' : 'lg:pl-64'
+      }`}>
         <main className="flex-1 p-6 md:p-8 pt-20 lg:pt-8 overflow-y-auto">
           {children}
         </main>
@@ -104,11 +109,7 @@ export default function App() {
           />
           <Route
             path="/history"
-            element={
-              <ProtectedRoute>
-                <Layout><HistoryPage /></Layout>
-              </ProtectedRoute>
-            }
+            element={<Navigate to="/monitoring" replace />}
           />
           <Route
             path="/profile"
@@ -119,9 +120,17 @@ export default function App() {
             }
           />
           <Route
+            path="/users"
+            element={
+              <ProtectedRoute allowedRoles={['admin', 'doctor', 'nurse']}>
+                <Layout><UsersManagementPage /></Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/simulator"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allowedRoles={['admin', 'doctor']}>
                 <Layout><SimulatorPage /></Layout>
               </ProtectedRoute>
             }

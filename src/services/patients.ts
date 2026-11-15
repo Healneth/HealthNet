@@ -2,23 +2,34 @@ import { AWS_CONFIG, isApiConfigured } from '../config/aws'
 import type { UserProfile, AlertConfig, Alert } from '../types'
 
 export interface ApiPatient {
+  id?: string
   device_id: string
   name: string
-  age: string
-  gender: string
-  weight: string
-  height: string
-  phone: string
-  emergency_contact: string
+  full_name?: string
+  age?: string
+  gender?: string
+  weight?: string
+  height?: string
+  phone?: string
+  contact_name?: string
+  contact_phone?: string
+  emergency_contact?: string
+  room_number?: string
+  floor?: string
+  assigned_nurse_id?: string
+  assigned_nurse_name?: string
+  medical_notes?: string
   hr_min: number
   hr_max: number
   temp_max: string | number
   notifications_active: boolean
   watch_theme: 'light' | 'dark'
+  bracelet_status?: 'DISPONIBLE' | 'ASIGNADO' | 'MANTENIMIENTO'
 }
 
 export interface PatientData {
   deviceId: string
+  patientId?: string
   patientName: string
   profile: UserProfile
   config: AlertConfig
@@ -28,27 +39,56 @@ export interface PatientData {
  * Convierte un registro de la base de datos (API) al formato interno del frontend
  */
 export function mapDbPatientToState(dbPatient: ApiPatient): PatientData {
+  const patientName = dbPatient.full_name || dbPatient.name || 'Paciente'
+  const contactName = dbPatient.contact_name || dbPatient.emergency_contact || 'Familiar Responsable'
+  const contactPhone = dbPatient.contact_phone || dbPatient.phone || '—'
+
   return {
     deviceId: dbPatient.device_id,
-    patientName: dbPatient.name,
+    patientId: dbPatient.id,
+    patientName,
     profile: {
-      name: dbPatient.name,
-      age: dbPatient.age || '',
-      gender: dbPatient.gender || '',
+      id: dbPatient.id,
+      name: patientName,
+      age: dbPatient.age || '65',
+      gender: dbPatient.gender === 'Mujer' ? 'Mujer' : 'Hombre',
       weight: dbPatient.weight || '',
       height: dbPatient.height || '',
       phone: dbPatient.phone || '',
-      emergencyContact: dbPatient.emergency_contact || '',
+      emergencyContactName: contactName,
+      emergencyContactPhone: contactPhone,
+      emergencyContact: `${contactName} (${contactPhone})`,
+      roomNumber: dbPatient.room_number || 'Hab. 101',
+      floor: dbPatient.floor || 'Piso 1',
+      assignedNurseId: dbPatient.assigned_nurse_id,
+      assignedNurseName: dbPatient.assigned_nurse_name,
+      medicalNotes: dbPatient.medical_notes || '',
     },
     config: {
-      hrMin: dbPatient.hr_min,
-      hrMax: dbPatient.hr_max,
-      tempMax: typeof dbPatient.temp_max === 'string' ? parseFloat(dbPatient.temp_max) : dbPatient.temp_max,
-      notificationsActive: dbPatient.notifications_active,
-      theme: 'light', // Se gestiona globalmente
+      hrMin: dbPatient.hr_min || 50,
+      hrMax: dbPatient.hr_max || 110,
+      tempMax: typeof dbPatient.temp_max === 'string' ? parseFloat(dbPatient.temp_max) : (dbPatient.temp_max || 38.0),
+      notificationsActive: dbPatient.notifications_active !== undefined ? dbPatient.notifications_active : true,
+      theme: 'light',
       watchTheme: dbPatient.watch_theme || 'dark',
     }
   }
+}
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+  }
+  try {
+    const raw = localStorage.getItem('healthnet_current_user')
+    if (raw) {
+      const user = JSON.parse(raw)
+      if (user.role) headers['X-User-Role'] = user.role
+      if (user.id) headers['X-User-Id'] = user.id
+      if (user.email) headers['X-User-Email'] = user.email
+    }
+  } catch {}
+  return headers
 }
 
 class PatientsService {
@@ -63,9 +103,7 @@ class PatientsService {
     try {
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/patients`, {
         method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-        }
+        headers: getAuthHeaders()
       })
 
       if (!response.ok) {
@@ -76,7 +114,7 @@ class PatientsService {
       return data.map(mapDbPatientToState)
     } catch (err) {
       console.error('[PatientsService] Error obteniendo pacientes de la base de datos:', err)
-      throw err;
+      throw err
     }
   }
 
@@ -89,20 +127,29 @@ class PatientsService {
     config: AlertConfig
   ): Promise<PatientData> {
     if (!isApiConfigured()) {
-      // Retornamos los mismos datos simulando éxito
       return { deviceId, patientName: profile.name, profile, config }
     }
 
     try {
       const payload = {
         deviceId,
+        id: profile.id,
         name: profile.name,
+        full_name: profile.name,
         age: profile.age,
-        gender: profile.gender,
+        gender: profile.gender === 'Mujer' ? 'Mujer' : 'Hombre',
         weight: profile.weight,
         height: profile.height,
         phone: profile.phone,
-        emergencyContact: profile.emergencyContact,
+        contact_name: profile.emergencyContactName || profile.emergencyContact,
+        contact_phone: profile.emergencyContactPhone,
+        emergencyContact: profile.emergencyContactName ? `${profile.emergencyContactName} (${profile.emergencyContactPhone || ''})` : profile.emergencyContact,
+        roomNumber: profile.roomNumber,
+        room_number: profile.roomNumber,
+        floor: profile.floor,
+        assigned_nurse_id: profile.assignedNurseId,
+        assigned_nurse_name: profile.assignedNurseName,
+        medicalNotes: profile.medicalNotes,
         hrMin: config.hrMin,
         hrMax: config.hrMax,
         tempMax: config.tempMax,
@@ -113,19 +160,21 @@ class PatientsService {
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/patients`, {
         method: 'POST',
         headers: {
+          ...getAuthHeaders(),
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
       })
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
       }
 
       const data: ApiPatient = await response.json()
       return mapDbPatientToState(data)
     } catch (err) {
-      console.error(`[PatientsService] Error guardando paciente ${deviceId} en la base de datos:`, err)
+      console.error(`[PatientsService] Error guardando paciente para ${deviceId}:`, err)
       throw err
     }
   }
@@ -134,17 +183,17 @@ class PatientsService {
    * Elimina un paciente de la base de datos
    */
   async deletePatient(deviceId: string): Promise<void> {
-    if (!isApiConfigured()) {
-      return
-    }
+    if (!isApiConfigured()) return
 
     try {
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/patients/${deviceId}`, {
         method: 'DELETE',
+        headers: getAuthHeaders()
       })
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
       }
     } catch (err) {
       console.error(`[PatientsService] Error eliminando paciente ${deviceId}:`, err)
@@ -152,28 +201,52 @@ class PatientsService {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  // ALERTS
-  // ─────────────────────────────────────────────────────────────────
-
+  /**
+   * Obtiene alertas almacenadas en la BD
+   */
   async getAlerts(): Promise<Alert[]> {
     if (!isApiConfigured()) return []
+
     try {
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/alerts`, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' }
+        headers: getAuthHeaders()
       })
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
       const data = await response.json()
-      // Adapt boolean in case DB returned something else
       return data.map((a: any) => ({
         id: a.id,
+        folio: a.folio || `TCK-${new Date(a.created_at || Date.now()).getFullYear()}-${String(a.id).slice(-4)}`,
         deviceId: a.device_id,
+        patientId: a.patient_id,
+        patientName: a.patient_name,
+        roomNumber: a.room_number,
+        floor: a.floor,
         type: a.type,
+        title: a.title || a.message,
+        description: a.description || a.message,
+        criticality: a.criticality || (a.type === 'fall' ? 'CRITICA' : 'MEDIA'),
+        clinicalValue: a.clinical_value,
         message: a.message,
-        timestamp: Number(a.timestamp),
+        timestamp: Number(a.timestamp || (a.created_at ? new Date(a.created_at).getTime() : Date.now())),
         acknowledged: Boolean(a.acknowledged),
-        status: a.acknowledged ? 'attended' : 'pending'
+        status: a.status || (a.acknowledged ? 'completado' : 'recibido'),
+        currentStatus: a.current_status || (a.acknowledged ? 'completado' : 'recibido'),
+        assignedTo: a.assigned_to || a.assigned_nurse_name,
+        assignedNurseName: a.assigned_nurse_name || a.assigned_to,
+        nurseId: a.assigned_nurse_id || a.nurse_id,
+        isUnassigned: Boolean(a.is_unassigned || (!a.assigned_to && !a.assigned_nurse_name)),
+        originalNurseId: a.original_nurse_id,
+        originalNurseName: a.original_nurse_name,
+        shiftType: a.shift_type || 'matutino',
+        notes: a.notes || [],
+        transfers: a.transfers || [],
+        activityLog: a.activity_log || [],
+        resolutionNotes: a.resolution_notes,
       }))
     } catch (err) {
       console.error('[PatientsService] Error obteniendo alertas:', err)
@@ -187,10 +260,13 @@ class PatientsService {
       const payload = {
         id: alert.id,
         deviceId: alert.deviceId,
+        patientId: alert.patientId,
         type: alert.type,
+        criticality: alert.criticality,
         message: alert.message,
         timestamp: alert.timestamp,
-        acknowledged: alert.acknowledged
+        acknowledged: alert.acknowledged,
+        currentStatus: alert.currentStatus
       }
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/alerts`, {
         method: 'POST',
@@ -207,11 +283,54 @@ class PatientsService {
     if (!isApiConfigured()) return
     try {
       const response = await fetch(`${AWS_CONFIG.apiEndpoint}/alerts/${alertId}/acknowledge`, {
-        method: 'PUT'
+        method: 'PUT',
+        headers: getAuthHeaders()
       })
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
     } catch (err) {
       console.error(`[PatientsService] Error reconociendo alerta ${alertId}:`, err)
+    }
+  }
+
+  async addTicketNote(ticketId: string, noteText: string, noteType: string = 'general'): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/tickets/${ticketId}/notes`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ text: noteText, type: noteType })
+      })
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+    } catch (err) {
+      console.error('[PatientsService] Error agregando nota al ticket:', err)
+    }
+  }
+
+  async updateTicketStatus(ticketId: string, status: string, resolutionNotes?: string): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/tickets/${ticketId}/status`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status, resolutionNotes })
+      })
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+    } catch (err) {
+      console.error('[PatientsService] Error actualizando estado de ticket:', err)
+    }
+  }
+
+  async transferTicket(ticketId: string, payload: { toNurseId: string; toNurseName: string; toShiftType: string; reason: string }): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/tickets/${ticketId}/transfer`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload)
+      })
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+    } catch (err) {
+      console.error('[PatientsService] Error transfiriendo ticket:', err)
     }
   }
 
@@ -222,7 +341,10 @@ class PatientsService {
         ? `${AWS_CONFIG.apiEndpoint}/alerts/${deviceId}`
         : `${AWS_CONFIG.apiEndpoint}/alerts`
         
-      const response = await fetch(url, { method: 'DELETE' })
+      const response = await fetch(url, { 
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      })
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
     } catch (err) {
       console.error('[PatientsService] Error borrando alertas:', err)

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { simulatorService } from '../services/simulator'
 import { useDeviceStore } from '../store/deviceStore'
+import { useAuth } from '../hooks/useAuth'
 import type { SimulatedDevice } from '../types'
 
 const PATIENT_NAMES = [
@@ -27,6 +28,8 @@ interface DeviceRow {
 }
 
 export default function SimulatorPage() {
+  const { user } = useAuth()
+  const canDelete = user?.role === 'admin'
   const storeDevices = useDeviceStore(s => Object.values(s.devices))
   const removeDevice = useDeviceStore(s => s.removeDevice)
 
@@ -54,10 +57,23 @@ export default function SimulatorPage() {
     })
   }, [])
 
-  // Sync database patients to simulator on mount/update
+  // Sync database patients to simulator on mount/update (excluyendo archivados y eliminados)
   useEffect(() => {
     let changed = false
-    storeDevices.forEach(d => {
+    const activeNonArchived = storeDevices.filter(d => !d.isArchived && d.profile?.isArchived !== true)
+
+    // Detener y remover dispositivos que hayan sido archivados o dados de baja
+    const currentSimDevices = simulatorService.getDevices()
+    currentSimDevices.forEach(sd => {
+      const isStillActive = activeNonArchived.some(d => d.deviceId === sd.deviceId)
+      if (!isStillActive) {
+        simulatorService.stopDevice(sd.deviceId)
+        simulatorService.removeDevice(sd.deviceId)
+        changed = true
+      }
+    })
+
+    activeNonArchived.forEach(d => {
       if (!simulatorService.getDevices().some(sd => sd.deviceId === d.deviceId)) {
         simulatorService.addDevice({
           deviceId: d.deviceId,
@@ -301,13 +317,16 @@ export default function SimulatorPage() {
                       {isRunning ? <><Square size={12} /> Detener</> : <><Play size={12} /> Iniciar</>}
                     </button>
 
-                    {/* Delete */}
-                    <button
-                      onClick={() => deleteDevice(config.deviceId)}
-                      className="p-2 rounded-lg hover:bg-red-50 text-hn-400 hover:text-red-500 transition-colors"
-                    >
-                      <Trash2 size={15} />
-                    </button>
+                    {/* Delete (solo Administrador) */}
+                    {canDelete && (
+                      <button
+                        onClick={() => deleteDevice(config.deviceId)}
+                        className="p-2 rounded-lg hover:bg-red-50 text-hn-400 hover:text-red-500 transition-colors"
+                        title="Eliminar dispositivo y paciente"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    )}
                   </div>
                 </div>
               )
