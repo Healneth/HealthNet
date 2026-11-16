@@ -681,7 +681,7 @@ const loadSidebarVisibility = (): boolean => {
 
 const generateAlertId = () => `alert-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
-function isNurseAuthorizedForTicket(ticket: Alert, user: AuthUser): boolean {
+export function isNurseAuthorizedForTicket(ticket: Alert, user: AuthUser): boolean {
   if (user.role !== 'nurse') return false
 
   // 1. Coincidencia por ID de enfermero asignado
@@ -1021,25 +1021,28 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
       return
     }
 
-    // Guardar acuse de recibo en BD
-    patientsService.acknowledgeAlert(alertId)
-      .catch(err => console.error('[Store] Error reconociendo alerta:', err))
+    if (!authUser || authUser.role !== 'nurse') {
+      console.warn('[Store] Acceso denegado: Se requiere un rol de enfermero autenticado.')
+      return
+    }
 
-    set((state) => {
-      const updatedAlerts = state.alerts.map(a =>
-        a.id === alertId ? { ...a, acknowledged: true, status: 'attended' as const, currentStatus: 'ATENDIDA' as const } : a
-      )
-      const updatedDevices = { ...state.devices }
-      for (const id in updatedDevices) {
-        updatedDevices[id] = {
-          ...updatedDevices[id],
-          alerts: updatedDevices[id].alerts.map(a =>
-            a.id === alertId ? { ...a, acknowledged: true, status: 'attended' as const, currentStatus: 'ATENDIDA' as const } : a
-          ),
-        }
-      }
-      return { alerts: updatedAlerts, devices: updatedDevices }
-    })
+    const state = useDeviceStore.getState()
+    const targetTicket = state.alerts.find(a => a.id === alertId || a.folio === alertId)
+    if (!targetTicket) return
+
+    // Validar si el enfermero es el responsable asignado
+    if (!isNurseAuthorizedForTicket(targetTicket, authUser)) {
+      console.warn(`[Store] Acceso denegado: Solo el enfermero asignado (${targetTicket.assignedNurseName || 'Sin asignar'}) puede atender este ticket.`)
+      return
+    }
+
+    // Ninguna acción de reconocimiento debe saltarse el proceso formal:
+    // Si está en 'recibido', pasar formalmente a 'en_progreso' con registro de actividad
+    if (targetTicket.status === 'recibido') {
+      useDeviceStore.getState().updateTicketStatus(targetTicket.id, 'en_progreso', undefined, authUser).catch(err => {
+        console.error('[Store] Error iniciando atención formal de ticket:', err)
+      })
+    }
   },
 
   updateAlertStatus: (alertId, newStatus, actionNotes, user) => {
@@ -1439,36 +1442,10 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
     }).catch(() => {})
   },
 
-  clearAlerts: (deviceId) => {
-    const authUser = getCurrentAuthUser()
-
-    // RBAC: Ni el Administrador ni el Doctor pueden descartar o limpiar alertas clínicas (función de enfermería)
-    if (authUser?.role === 'admin' || authUser?.role === 'doctor') {
-      console.warn(`[Store] Acceso denegado: El rol ${authUser?.role} no tiene autorización para descartar o eliminar alertas clínicas.`)
-      return
-    }
-
-    // Borrar de la BD
-    patientsService.clearAlerts(deviceId)
-      .catch(err => console.error('[Store] Error limpiando alertas:', err))
-
-    set((state) => {
-      if (deviceId) {
-        const updatedDevices = { ...state.devices }
-        if (updatedDevices[deviceId]) {
-          updatedDevices[deviceId] = { ...updatedDevices[deviceId], alerts: [] }
-        }
-        return {
-          devices: updatedDevices,
-          alerts: state.alerts.filter(a => a.deviceId !== deviceId),
-        }
-      }
-      const updatedDevices = { ...state.devices }
-      for (const id in updatedDevices) {
-        updatedDevices[id] = { ...updatedDevices[id], alerts: [] }
-      }
-      return { devices: updatedDevices, alerts: [] }
-    })
+  clearAlerts: (_deviceId) => {
+    // SEGURIDAD CLÍNICA: Las alertas y tickets son registros inmutables protegidos.
+    // No se permite eliminar ni vaciar la lista de alertas/tickets para garantizar la trazabilidad médica.
+    console.warn('[Store] Acción protegida: Las alertas y tickets clínicos son registros inmutables protegidos. No pueden eliminarse ni vaciarse de forma masiva sin el proceso formal de atención.')
   },
 
   removeDevice: async (deviceId) => {
@@ -1907,6 +1884,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
     }
 
     try {
+      await patientsService.archivePatient(deviceId, reason, authUser?.fullName || 'Administrador')
       await patientsService.savePatient(deviceId, updatedProfile, device.config || DEFAULT_CONFIG)
     } catch (err) {
       console.error('[Store] Error archivando paciente en la BD:', err)
@@ -1971,6 +1949,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
     }
 
     try {
+      await patientsService.unarchivePatient(deviceId)
       await patientsService.savePatient(deviceId, updatedProfile, device.config || DEFAULT_CONFIG)
     } catch (err) {
       console.error('[Store] Error reactivando paciente en la BD:', err)

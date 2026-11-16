@@ -3,6 +3,7 @@ import {
   signIn, signOut, getCurrentUser, fetchAuthSession,
 } from 'aws-amplify/auth'
 import { amplifyConfig, isAwsConfigured } from '../config/aws'
+import { patientsService } from './patients'
 import type { AuthUser, UserRole, SystemUser } from '../types'
 
 // Configura Amplify si AWS está configurado
@@ -182,8 +183,10 @@ export async function login(email: string, password: string): Promise<AuthUser> 
 
   // Bloqueo de seguridad: Si la cuenta está suspendida en el sistema, denegar acceso inmediatamente
   if (foundUser && foundUser.isActive === false) {
-    const reasonDetail = foundUser.suspendedReason ? ` Motivo: ${foundUser.suspendedReason}.` : ''
-    throw new Error(`Esta cuenta ha sido suspendida.${reasonDetail} Contacta al administrador del sistema para más información.`)
+    const reasonStr = foundUser.suspendedReason || 'Suspensión administrativa de credenciales'
+    const byStr = foundUser.suspendedBy ? ` por ${foundUser.suspendedBy}` : ''
+    const dateStr = foundUser.suspendedAt ? ` el ${new Date(foundUser.suspendedAt).toLocaleDateString('es-ES')}` : ''
+    throw new Error(`Acceso denegado: Esta cuenta ha sido suspendida${byStr}${dateStr}. Motivo: ${reasonStr}. Contacta a la administración para más información.`)
   }
 
   // 1. SI ES UN USUARIO LOCAL / PRECONFIGURADO: Autenticar localmente de inmediato
@@ -252,16 +255,39 @@ export async function logout(): Promise<void> {
 }
 
 export async function getAuthenticatedUser(): Promise<AuthUser> {
+  const checkSuspended = (user: AuthUser): void => {
+    const sysUsers = getSystemUsers()
+    const found = sysUsers.find(u => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase())
+    if (found && found.isActive === false) {
+      _currentUser = null
+      localStorage.removeItem(LOCAL_STORAGE_AUTH_KEY)
+      const reason = found.suspendedReason || 'Suspensión administrativa de credenciales'
+      const byStr = found.suspendedBy ? ` por ${found.suspendedBy}` : ''
+      throw new Error(`Cuenta suspendida: Tu acceso ha sido revocado${byStr}. Motivo: ${reason}.`)
+    }
+  }
+
   // Primero revisar sesión en memoria o localStorage
-  if (_currentUser) return _currentUser
+  if (_currentUser) {
+    checkSuspended(_currentUser)
+    return _currentUser
+  }
 
   try {
     const saved = localStorage.getItem(LOCAL_STORAGE_AUTH_KEY)
     if (saved) {
-      _currentUser = JSON.parse(saved)
+      const parsed: AuthUser = JSON.parse(saved)
+      checkSuspended(parsed)
+      _currentUser = parsed
       return _currentUser!
     }
-  } catch {}
+  } catch (e: any) {
+    _currentUser = null
+    localStorage.removeItem(LOCAL_STORAGE_AUTH_KEY)
+    if (e?.message?.includes('Cuenta suspendida')) {
+      throw e
+    }
+  }
 
   // Si no hay sesión local y AWS está configurado, consultar Cognito
   if (isAwsConfigured()) {
@@ -270,6 +296,12 @@ export async function getAuthenticatedUser(): Promise<AuthUser> {
       const email = user.signInDetails?.loginId || user.username
       const sysUsers = getSystemUsers()
       const matched = sysUsers.find(u => u.email.toLowerCase() === email.toLowerCase())
+
+      if (matched && matched.isActive === false) {
+        _currentUser = null
+        localStorage.removeItem(LOCAL_STORAGE_AUTH_KEY)
+        throw new Error(`Cuenta suspendida: Esta cuenta ha sido suspendida por la administración. Motivo: ${matched.suspendedReason || 'Suspensión administrativa'}.`)
+      }
 
       _currentUser = {
         id: matched?.id || user.userId,
@@ -281,12 +313,69 @@ export async function getAuthenticatedUser(): Promise<AuthUser> {
       }
       localStorage.setItem(LOCAL_STORAGE_AUTH_KEY, JSON.stringify(_currentUser))
       return _currentUser
-    } catch {
+    } catch (cognitoErr: any) {
+      if (cognitoErr?.message?.includes('Cuenta suspendida')) throw cognitoErr
       throw new Error('No autenticado')
     }
   }
 
   throw new Error('No autenticado')
+}
+
+/**
+ * Actualiza el estado de una cuenta de usuario (suspensión o reactivación).
+ * RBAC: Exclusivo para Administrador.
+ */
+export async function updateSystemUserStatus(
+  userId: string,
+  isActive: boolean,
+  reason?: string,
+  adminUser?: AuthUser | null
+): Promise<SystemUser> {
+  if (adminUser && adminUser.role !== 'admin') {
+    throw new Error('Acceso Denegado (RBAC): Únicamente el Administrador tiene autorización para suspender o reactivar cuentas de usuario.')
+  }
+
+  const sysUsers = getSystemUsers()
+  const target = sysUsers.find(u => u.id === userId || u.email.toLowerCase() === userId.toLowerCase())
+  if (!target) {
+    throw new Error(`Usuario con identificador ${userId} no encontrado en el sistema.`)
+  }
+
+  const nowIso = new Date().toISOString()
+  const updatedUsers = sysUsers.map(u => {
+    if (u.id === target.id) {
+      return {
+        ...u,
+        isActive,
+        suspendedAt: isActive ? undefined : (u.suspendedAt || nowIso),
+        suspendedBy: isActive ? undefined : (adminUser?.fullName || 'Administrador'),
+        suspendedByUserId: isActive ? undefined : (adminUser?.id || ''),
+        suspendedReason: isActive ? undefined : (reason?.trim() || 'Suspensión administrativa de credenciales'),
+      }
+    }
+    return u
+  })
+
+  saveSystemUsers(updatedUsers)
+
+  // Si la cuenta que se suspendió es la sesión actualmente activa en este navegador, cerrarla inmediatamente
+  if (!isActive && _currentUser && (_currentUser.id === target.id || _currentUser.email.toLowerCase() === target.email.toLowerCase())) {
+    _currentUser = null
+    localStorage.removeItem(LOCAL_STORAGE_AUTH_KEY)
+  }
+
+  // Notificar al backend API
+  patientsService.updateUserStatus(
+    target.id,
+    isActive,
+    reason?.trim() || 'Suspensión administrativa de credenciales',
+    adminUser?.fullName || 'Administrador'
+  ).catch(err => {
+    console.warn('[Auth] Notificación de suspensión al backend en espera de conexión a BD:', err.message)
+  })
+
+  return updatedUsers.find(u => u.id === target.id)!
 }
 
 export async function getAccessToken(): Promise<string | null> {

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Heart, Thermometer, AlertTriangle, Battery, ChevronDown, ChevronUp, Wifi, FileText, Bed, HeartHandshake } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -6,7 +7,7 @@ import type { DeviceState } from '../types'
 import { THRESHOLDS, ROLE_PERMISSIONS } from '../types'
 import HeartRateChart from './charts/HeartRateChart'
 import TempChart from './charts/TempChart'
-import { useDeviceStore } from '../store/deviceStore'
+import { useDeviceStore, isNurseAuthorizedForTicket } from '../store/deviceStore'
 import { useAuth } from '../hooks/useAuth'
 import DeviceReportTemplate from './DeviceReportTemplate'
 import html2canvas from 'html2canvas'
@@ -39,6 +40,7 @@ function BatteryIcon({ level }: { level: number }) {
 }
 
 export default function DeviceCard({ device, expanded, onToggleExpanded }: Props) {
+  const navigate = useNavigate()
   const { user } = useAuth()
   const permissions = user?.role ? ROLE_PERMISSIONS[user.role] : null
   const canAttendAlerts = permissions?.canAttendAlerts ?? false
@@ -234,26 +236,44 @@ export default function DeviceCard({ device, expanded, onToggleExpanded }: Props
       {/* Unread alerts */}
       {unread.length > 0 && (
         <div className="px-5 pb-3 space-y-1.5">
-          {unread.slice(0, 3).map(alert => (
-            <div key={alert.id} className="flex items-center justify-between bg-amber-50 border border-amber-200 dark:bg-amber-500/10 dark:border-amber-500/20 rounded-lg px-3 py-1.5">
-              <div className="flex items-center gap-2">
-                <AlertTriangle size={12} className="text-amber-500" />
-                <span className="text-xs text-amber-700 dark:text-amber-400 font-semibold">{alert.message}</span>
+          {unread.slice(0, 3).map(alert => {
+            const isResponsible = user?.role === 'nurse' && isNurseAuthorizedForTicket(alert, user)
+            const isAttending = alert.currentStatus === 'EN_ATENCION' || alert.status === 'en_progreso'
+            return (
+              <div key={alert.id} className="flex items-center justify-between bg-amber-50 border border-amber-200 dark:bg-amber-500/10 dark:border-amber-500/20 rounded-lg px-3 py-1.5">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle size={12} className="text-amber-500" />
+                  <span className="text-xs text-amber-700 dark:text-amber-400 font-semibold">{alert.message}</span>
+                </div>
+                {isResponsible ? (
+                  isAttending ? (
+                    <button
+                      onClick={() => navigate('/tickets')}
+                      className="text-[10px] text-blue-600 hover:text-blue-800 dark:text-blue-400 font-bold ml-2 whitespace-nowrap bg-blue-100/60 dark:bg-blue-950/40 px-2 py-0.5 rounded transition-colors"
+                      title="Para resolver este ticket se requiere registrar la nota clínica de resolución"
+                    >
+                      En atención · Resolver
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => acknowledgeAlert(alert.id)}
+                      className="text-[10px] text-amber-700 hover:text-amber-900 dark:text-amber-300 font-bold ml-2 whitespace-nowrap bg-amber-200/60 dark:bg-amber-900/40 px-2 py-0.5 rounded transition-colors"
+                      title="Comenzar atención clínica formal del ticket"
+                    >
+                      Atender
+                    </button>
+                  )
+                ) : (
+                  <span
+                    className="text-[10px] text-slate-500 dark:text-slate-400 font-medium ml-2 whitespace-nowrap"
+                    title={alert.assignedNurseName ? `Asignado a: ${alert.assignedNurseName}` : 'Sin enfermero asignado'}
+                  >
+                    {isAttending ? 'En atención' : (alert.assignedNurseName ? `Enf. ${alert.assignedNurseName.split(' ')[0]}` : 'Pendiente')}
+                  </span>
+                )}
               </div>
-              {canAttendAlerts ? (
-                <button
-                  onClick={() => acknowledgeAlert(alert.id)}
-                  className="text-[10px] text-amber-600 hover:text-amber-800 dark:text-amber-400 font-bold ml-2 whitespace-nowrap"
-                >
-                  OK
-                </button>
-              ) : (
-                <span className="text-[10px] text-amber-600/70 dark:text-amber-400/70 font-medium ml-2 whitespace-nowrap">
-                  Pendiente
-                </span>
-              )}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

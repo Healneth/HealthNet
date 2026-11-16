@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Activity, Heart, Thermometer, AlertTriangle,
-  Users, Wifi, WifiOff, BellOff, ArrowLeft, Stethoscope,
+  Users, Wifi, WifiOff, BellOff, ArrowLeft, Stethoscope, Ticket
 } from 'lucide-react'
 import { useDeviceStore } from '../store/deviceStore'
 import { useAuth } from '../hooks/useAuth'
@@ -42,10 +43,10 @@ function StatCard({
 }
 
 export default function DashboardPage() {
+  const navigate = useNavigate()
   const { user } = useAuth()
   const rawDevices    = useDeviceStore(s => Object.values(s.devices))
   const rawAlerts     = useDeviceStore(s => s.alerts)
-  const clearAlerts   = useDeviceStore(s => s.clearAlerts)
 
   // Acceso general: Todos los enfermeros pueden consultar la información de todos los pacientes en Dashboard
   const isNurse = user?.role === 'nurse'
@@ -120,13 +121,13 @@ export default function DashboardPage() {
             Monitoreo en tiempo real · AWS IoT Core
           </p>
         </div>
-        {unreadAlerts > 0 && isNurse && (
+        {unreadAlerts > 0 && (
           <button
-            onClick={() => clearAlerts()}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-slate-200 dark:bg-slate-900 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold hover:bg-slate-50 dark:hover:bg-slate-850 transition-all active:scale-95 shadow-sm"
+            onClick={() => navigate('/tickets')}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-slate-200 dark:bg-slate-900 dark:border-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold hover:bg-slate-50 dark:hover:bg-slate-850 transition-all active:scale-95 shadow-sm cursor-pointer"
           >
-            <BellOff size={14} />
-            Marcar todas leídas ({unreadAlerts})
+            <Ticket size={14} className="text-amber-500" />
+            Gestionar tickets ({unreadAlerts})
           </button>
         )}
       </div>
@@ -170,14 +171,12 @@ export default function DashboardPage() {
           <p className="text-red-700 dark:text-red-400 font-bold text-xs flex-1">
             {fallAlerts} caída(s) detectada(s) — revisa las tarjetas resaltadas
           </p>
-          {isNurse && (
-            <button
-              onClick={() => clearAlerts()}
-              className="text-xs text-red-500 hover:text-red-700 font-bold"
-            >
-              Descartar
-            </button>
-          )}
+          <button
+            onClick={() => navigate('/tickets')}
+            className="text-xs text-red-600 hover:text-red-800 dark:text-red-400 font-bold underline cursor-pointer"
+          >
+            Atender en Tickets
+          </button>
         </div>
       )}
 

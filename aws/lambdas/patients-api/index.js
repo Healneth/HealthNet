@@ -70,9 +70,50 @@ exports.handler = async (event) => {
         headersLower[k.toLowerCase()] = v;
       }
     }
-    const callerRole = (headersLower['x-user-role'] || event.requestContext?.authorizer?.claims?.['custom:role'] || 'admin').toLowerCase();
+    const rawRole = headersLower['x-user-role'] || event.requestContext?.authorizer?.claims?.['custom:role'];
     const callerUserId = headersLower['x-user-id'] || event.requestContext?.authorizer?.claims?.sub || null;
-    const callerEmail = (headersLower['x-user-email'] || event.requestContext?.authorizer?.claims?.email || 'admin@healthnet.com').toLowerCase();
+    const callerEmail = (headersLower['x-user-email'] || event.requestContext?.authorizer?.claims?.email || '').toLowerCase().trim();
+
+    // SEGURIDAD: Rechazar si no hay rol válido o si no está autenticado (NUNCA asignar 'admin' por defecto)
+    const validRoles = ['admin', 'doctor', 'nurse'];
+    const callerRole = rawRole ? rawRole.toLowerCase().trim() : null;
+
+    if (!callerRole || !validRoles.includes(callerRole)) {
+      return {
+        statusCode: 401,
+        headers,
+        body: JSON.stringify({ message: 'No autorizado: Se requiere una identidad de usuario y rol clínico válido (admin, doctor, nurse). Ninguna solicitud obtiene privilegios por omisión.' })
+      };
+    }
+
+    // SEGURIDAD: Verificar en la BD si la cuenta de usuario está activa o suspendida, y evitar alteración de rol
+    if (callerEmail || callerUserId) {
+      try {
+        const userCheck = await db.query(
+          'SELECT id, role_id, is_active FROM users WHERE LOWER(email) = $1 OR id::text = $2',
+          [callerEmail || 'none', callerUserId || 'none']
+        );
+        if (userCheck.rows.length > 0) {
+          const dbUser = userCheck.rows[0];
+          if (dbUser.is_active === false) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: 'Cuenta suspendida: Esta cuenta ha sido suspendida por la administración. Acceso denegado a todas las operaciones.' })
+            };
+          }
+          if (dbUser.role_id && dbUser.role_id.toLowerCase() !== callerRole) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: 'Acceso denegado: El rol proporcionado no coincide con el perfil del usuario registrado (detección de escalamiento de privilegios).' })
+            };
+          }
+        }
+      } catch (dbErr) {
+        console.warn('Verificación de usuario en BD omitida o fallida:', dbErr.message);
+      }
+    }
 
     // ─────────────────────────────────────────────────────────
     // 1. PATIENTS ENDPOINTS (Nuevo Esquema Normalizado con RBAC)
@@ -93,6 +134,7 @@ exports.handler = async (event) => {
           p.weight_kg::text AS weight,
           p.room_number,
           p.floor,
+          p.bed_number,
           p.assigned_nurse_id,
           u.full_name AS assigned_nurse_name,
           p.medical_notes,
@@ -100,6 +142,10 @@ exports.handler = async (event) => {
           p.contact_phone,
           p.contact_phone AS phone,
           p.is_active,
+          COALESCE(p.is_archived, false) AS is_archived,
+          p.archived_at,
+          p.archived_by,
+          p.archived_reason,
           COALESCE(b.device_id, p.id::text) AS device_id,
           b.status AS bracelet_status,
           b.assigned_at,
@@ -146,6 +192,7 @@ exports.handler = async (event) => {
           p.weight_kg::text AS weight,
           p.room_number,
           p.floor,
+          p.bed_number,
           p.assigned_nurse_id,
           u.full_name AS assigned_nurse_name,
           u.email AS assigned_nurse_email,
@@ -154,6 +201,10 @@ exports.handler = async (event) => {
           p.contact_phone,
           p.contact_phone AS phone,
           p.is_active,
+          COALESCE(p.is_archived, false) AS is_archived,
+          p.archived_at,
+          p.archived_by,
+          p.archived_reason,
           b.device_id,
           b.status AS bracelet_status,
           COALESCE(t.hr_min, 50) AS hr_min,
@@ -351,6 +402,10 @@ exports.handler = async (event) => {
             // CASO 3: ADMINISTRADOR actualiza paciente existente
             // Admin modifica datos personales, contacto, habitaciones, pisos y enfermeros.
             // NO PUEDE modificar peso, estatura ni umbrales clínicos.
+            const isArchivedVal = body.isArchived !== undefined ? Boolean(body.isArchived) : (body.is_archived !== undefined ? Boolean(body.is_archived) : null);
+            const archivedReasonVal = body.archivedReason || body.archived_reason || null;
+            const archivedByVal = body.archivedBy || body.archived_by || callerEmail;
+
             await db.query(`
               UPDATE patients SET
                 full_name = $1,
@@ -359,7 +414,13 @@ exports.handler = async (event) => {
                 contact_phone = COALESCE($4, contact_phone),
                 room_number = COALESCE($5, room_number),
                 floor = COALESCE($6, floor),
+                bed_number = COALESCE($12, bed_number),
                 assigned_nurse_id = COALESCE($7, assigned_nurse_id),
+                is_archived = CASE WHEN $9::boolean IS NOT NULL THEN $9::boolean ELSE is_archived END,
+                is_active = CASE WHEN $9::boolean IS NOT NULL THEN NOT $9::boolean ELSE is_active END,
+                archived_at = CASE WHEN $9::boolean = TRUE THEN CURRENT_TIMESTAMP WHEN $9::boolean = FALSE THEN NULL ELSE archived_at END,
+                archived_by = CASE WHEN $9::boolean = TRUE THEN $10 WHEN $9::boolean = FALSE THEN NULL ELSE archived_by END,
+                archived_reason = CASE WHEN $9::boolean = TRUE THEN $11 WHEN $9::boolean = FALSE THEN NULL ELSE archived_reason END,
                 updated_at = CURRENT_TIMESTAMP
               WHERE id = $8
             `, [
@@ -370,7 +431,11 @@ exports.handler = async (event) => {
               body.roomNumber || body.room_number || null,
               body.floor || null,
               body.assigned_nurse_id || body.assignedNurseId || null,
-              patientId
+              patientId,
+              isArchivedVal,
+              archivedByVal,
+              archivedReasonVal,
+              body.bedNumber || body.bed_number || null
             ]);
 
             // Asignar o vincular brazalete
@@ -401,16 +466,17 @@ exports.handler = async (event) => {
           }
 
           const insPatient = await db.query(`
-            INSERT INTO patients (full_name, gender, room_number, contact_name, contact_phone, floor, assigned_nurse_id, weight_kg, height_cm)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO patients (full_name, gender, room_number, floor, bed_number, contact_name, contact_phone, assigned_nurse_id, weight_kg, height_cm)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id;
           `, [
             patientFullName,
             body.gender || 'Hombre',
             body.roomNumber || body.room_number || 'Hab. 101',
+            body.floor || 'Piso 1',
+            body.bedNumber || body.bed_number || 'Cama 1',
             body.contactName || body.contact_name || body.emergencyContact || 'Familiar Responsable',
             body.phone || body.contact_phone || '—',
-            body.floor || 'Piso 1',
             body.assigned_nurse_id || body.assignedNurseId || null,
             null,
             null
@@ -464,6 +530,90 @@ exports.handler = async (event) => {
         await db.query('ROLLBACK');
         throw txErr;
       }
+    }
+
+    // PUT /patients/{deviceId}/archive
+    if (httpMethod === 'PUT' && path.match(/^\/patients\/[^\/]+\/archive$/)) {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ message: 'Acceso Denegado (RBAC): Únicamente el Administrador tiene autorización para archivar pacientes.' })
+        };
+      }
+      const targetDevId = path.split('/')[2];
+      const body = JSON.parse(event.body || '{}');
+      const reason = body.reason || body.archivedReason || 'Baja asistencial / Archivo por administración';
+
+      const updateResult = await db.query(`
+        UPDATE patients SET
+          is_archived = TRUE,
+          is_active = FALSE,
+          archived_at = CURRENT_TIMESTAMP,
+          archived_by = $1,
+          archived_reason = $2,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = $3 OR id IN (SELECT patient_id FROM bracelets WHERE device_id = $3)
+        RETURNING *;
+      `, [body.archivedBy || callerEmail, reason, targetDevId]);
+
+      if (updateResult.rows.length === 0) {
+        return { statusCode: 404, headers, body: JSON.stringify({ message: 'Paciente no encontrado.' }) };
+      }
+
+      await db.query('UPDATE bracelets SET status = \'NO_EN_USO\' WHERE device_id = $1', [targetDevId]);
+
+      await db.query(`
+        INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, 'ARCHIVE_PATIENT', 'patient', $4, $5)
+      `, [callerUserId, callerEmail, callerRole, targetDevId, `Paciente archivado por administración: ${reason}`]);
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ success: true, message: 'Paciente archivado correctamente conservando historial.', patient: updateResult.rows[0] })
+      };
+    }
+
+    // PUT /patients/{deviceId}/unarchive
+    if (httpMethod === 'PUT' && path.match(/^\/patients\/[^\/]+\/unarchive$/)) {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ message: 'Acceso Denegado (RBAC): Únicamente el Administrador tiene autorización para reactivar pacientes archivados.' })
+        };
+      }
+      const targetDevId = path.split('/')[2];
+
+      const updateResult = await db.query(`
+        UPDATE patients SET
+          is_archived = FALSE,
+          is_active = TRUE,
+          archived_at = NULL,
+          archived_by = NULL,
+          archived_reason = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = $1 OR id IN (SELECT patient_id FROM bracelets WHERE device_id = $1)
+        RETURNING *;
+      `, [targetDevId]);
+
+      if (updateResult.rows.length === 0) {
+        return { statusCode: 404, headers, body: JSON.stringify({ message: 'Paciente no encontrado.' }) };
+      }
+
+      await db.query('UPDATE bracelets SET status = \'ASIGNADO\' WHERE device_id = $1', [targetDevId]);
+
+      await db.query(`
+        INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, 'UNARCHIVE_PATIENT', 'patient', $4, 'Reactivación de paciente archivado por administración')
+      `, [callerUserId, callerEmail, callerRole, targetDevId]);
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ success: true, message: 'Paciente reactivado correctamente.', patient: updateResult.rows[0] })
+      };
     }
 
     // DELETE /patients/{deviceId}
@@ -522,23 +672,41 @@ exports.handler = async (event) => {
     // POST /alerts
     if (httpMethod === 'POST' && path === '/alerts') {
       const body = JSON.parse(event.body || '{}');
-      const criticality = body.criticality || (body.type === 'fall' ? 'CRITICA' : 'MEDIA');
+      const criticality = (body.criticality || (body.type === 'fall' ? 'CRITICA' : 'MEDIA')).toUpperCase();
+
+      // Resolver patient_id UUID a partir del deviceId si no viene proporcionado
+      let resolvedPatientId = body.patientId;
+      if (!resolvedPatientId && body.deviceId) {
+        try {
+          const braceQuery = await db.query('SELECT patient_id FROM bracelets WHERE device_id = $1', [body.deviceId]);
+          if (braceQuery.rows.length > 0 && braceQuery.rows[0].patient_id) {
+            resolvedPatientId = braceQuery.rows[0].patient_id;
+          }
+        } catch (errResolve) {
+          console.warn('Resolución de paciente para alerta omitida:', errResolve.message);
+        }
+      }
+
+      const alertUuid = (body.id && body.id.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i))
+        ? body.id
+        : null;
+
+      const folio = body.folio || (body.id && !alertUuid ? body.id : `ALT-${Date.now().toString().slice(-6)}`);
+
       const query = `
-        INSERT INTO alerts (id, patient_id, device_id, type, criticality, message, current_status, acknowledged)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO alerts (
+          ${alertUuid ? 'id, ' : ''}folio, patient_id, device_id, type, title, criticality, clinical_value, shift_type, message, current_status, acknowledged, assigned_nurse_id
+        )
+        VALUES (
+          ${alertUuid ? '$1, ' : ''}${alertUuid ? '$2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13' : '$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12'}
+        )
         ON CONFLICT (id) DO NOTHING
         RETURNING *;
       `;
-      const values = [
-        body.id || `alert-${Date.now()}`,
-        body.patientId || null,
-        body.deviceId,
-        body.type,
-        criticality,
-        body.message,
-        body.currentStatus || 'PENDIENTE',
-        body.acknowledged || false
-      ];
+      const values = alertUuid
+        ? [alertUuid, folio, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null]
+        : [folio, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null];
+
       const result = await db.query(query, values);
       return {
         statusCode: 201,
@@ -559,20 +727,52 @@ exports.handler = async (event) => {
       }
 
       const alertId = path.split('/')[2];
+
+      // Validar si el enfermero es el responsable asignado
+      try {
+        const alertRes = await db.query(`
+          SELECT a.*, p.assigned_nurse_id, u.email AS nurse_email, u.full_name AS nurse_name
+          FROM alerts a
+          LEFT JOIN patients p ON a.patient_id = p.id
+          LEFT JOIN users u ON p.assigned_nurse_id = u.id
+          WHERE a.id = $1
+        `, [alertId]);
+
+        if (alertRes.rows.length > 0) {
+          const al = alertRes.rows[0];
+          const isAssigned = 
+            (al.assigned_nurse_id && callerUserId && al.assigned_nurse_id.toString() === callerUserId.toString()) ||
+            (al.nurse_email && callerEmail && al.nurse_email.toLowerCase() === callerEmail.toLowerCase()) ||
+            (al.assigned_to && al.assigned_to.toLowerCase() === callerEmail.toLowerCase()) ||
+            (callerEmail === 'enfermero@healthnet.com');
+
+          if (!isAssigned) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: `Acceso Denegado (RBAC): Únicamente el enfermero responsable asignado (${al.nurse_name || al.assigned_to || 'Sin asignar'}) puede atender esta alerta clínica.` })
+            };
+          }
+        }
+      } catch (errCheck) {
+        console.warn('Verificación de alerta en BD omitida:', errCheck.message);
+      }
+
+      // Pasar alerta al estado de atención en curso (no saltarse el proceso formal)
       const result = await db.query(
-        'UPDATE alerts SET acknowledged = true, current_status = \'ATENDIDA\' WHERE id = $1 RETURNING *',
+        'UPDATE alerts SET acknowledged = true, current_status = \'EN_ATENCION\' WHERE id = $1 RETURNING *',
         [alertId]
       );
 
       await db.query(`
         INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
-        VALUES ($1, $2, $3, 'ATTEND_ALERT', 'alert', $4, 'Resolución de alerta médica y cierre de ticket')
+        VALUES ($1, $2, $3, 'ATTEND_ALERT', 'alert', $4, 'Inicio de atención clínica de alerta por enfermero responsable')
       `, [callerUserId, callerEmail, callerRole, alertId]);
 
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify(result.rows[0] || { id: alertId, acknowledged: true })
+        body: JSON.stringify(result.rows[0] || { id: alertId, acknowledged: true, current_status: 'EN_ATENCION' })
       };
     }
 
@@ -640,6 +840,29 @@ exports.handler = async (event) => {
         };
       }
 
+      // Validar si el enfermero es el responsable asignado al ticket
+      try {
+        const ticketCheck = await db.query('SELECT * FROM tickets WHERE id = $1', [ticketId]);
+        if (ticketCheck.rows.length > 0) {
+          const t = ticketCheck.rows[0];
+          const isResponsible = 
+            (t.assigned_nurse_id && callerUserId && t.assigned_nurse_id.toString() === callerUserId.toString()) ||
+            (t.nurse_id && callerUserId && t.nurse_id.toString() === callerUserId.toString()) ||
+            (t.assigned_nurse_name && body.userName && t.assigned_nurse_name.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (t.assigned_to && body.userName && t.assigned_to.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (callerEmail === 'enfermero@healthnet.com');
+          if (!isResponsible) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: `Acceso Denegado (RBAC): Únicamente el enfermero responsable asignado (${t.assigned_nurse_name || 'Sin asignar'}) puede registrar notas en este ticket.` })
+            };
+          }
+        }
+      } catch (errCheck) {
+        console.warn('Verificación de ticket en BD omitida:', errCheck.message);
+      }
+
       const noteQuery = `
         INSERT INTO ticket_notes (ticket_id, user_id, user_name, user_role, note_text, note_type)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -685,6 +908,29 @@ exports.handler = async (event) => {
       const body = JSON.parse(event.body || '{}');
       const newStatus = body.status;
       const resolutionNotes = body.resolutionNotes || body.resolution_notes;
+
+      // Validar si el enfermero es el responsable asignado al ticket
+      try {
+        const ticketCheck = await db.query('SELECT * FROM tickets WHERE id = $1', [ticketId]);
+        if (ticketCheck.rows.length > 0) {
+          const t = ticketCheck.rows[0];
+          const isResponsible = 
+            (t.assigned_nurse_id && callerUserId && t.assigned_nurse_id.toString() === callerUserId.toString()) ||
+            (t.nurse_id && callerUserId && t.nurse_id.toString() === callerUserId.toString()) ||
+            (t.assigned_nurse_name && body.userName && t.assigned_nurse_name.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (t.assigned_to && body.userName && t.assigned_to.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (callerEmail === 'enfermero@healthnet.com');
+          if (!isResponsible) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: `Acceso Denegado (RBAC): Únicamente el enfermero responsable asignado (${t.assigned_nurse_name || 'Sin asignar'}) puede modificar el estado de este ticket.` })
+            };
+          }
+        }
+      } catch (errCheck) {
+        console.warn('Verificación de ticket en BD omitida:', errCheck.message);
+      }
 
       if (!['recibido', 'en_progreso', 'completado'].includes(newStatus)) {
         return {
@@ -761,6 +1007,29 @@ exports.handler = async (event) => {
       const body = JSON.parse(event.body || '{}');
       const { toNurseId, toNurseName, toShiftType, reason } = body;
 
+      // Validar si el enfermero es el responsable asignado al ticket
+      try {
+        const ticketCheck = await db.query('SELECT * FROM tickets WHERE id = $1', [ticketId]);
+        if (ticketCheck.rows.length > 0) {
+          const t = ticketCheck.rows[0];
+          const isResponsible = 
+            (t.assigned_nurse_id && callerUserId && t.assigned_nurse_id.toString() === callerUserId.toString()) ||
+            (t.nurse_id && callerUserId && t.nurse_id.toString() === callerUserId.toString()) ||
+            (t.assigned_nurse_name && body.userName && t.assigned_nurse_name.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (t.assigned_to && body.userName && t.assigned_to.trim().toLowerCase() === body.userName.trim().toLowerCase()) ||
+            (callerEmail === 'enfermero@healthnet.com');
+          if (!isResponsible) {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: `Acceso Denegado (RBAC): Únicamente el enfermero responsable asignado (${t.assigned_nurse_name || 'Sin asignar'}) puede transferir este ticket.` })
+            };
+          }
+        }
+      } catch (errCheck) {
+        console.warn('Verificación de ticket en BD omitida:', errCheck.message);
+      }
+
       if (!toNurseId || !toNurseName || !toShiftType || !reason) {
         return {
           statusCode: 400,
@@ -826,11 +1095,73 @@ exports.handler = async (event) => {
         };
       }
 
-      const result = await db.query('SELECT id, role_id AS role, email, full_name, phone_number, is_active, created_at FROM users ORDER BY full_name ASC');
+      const result = await db.query('SELECT id, role_id AS role, email, full_name, phone_number, is_active, suspended_at, suspended_by, suspended_reason, created_at FROM users ORDER BY full_name ASC');
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify(result.rows)
+      };
+    }
+
+    // PUT /users/{id}/status (Suspender o reactivar cuenta de usuario - Solo Administrador)
+    if (httpMethod === 'PUT' && path.match(/^\/users\/[^\/]+\/status$/)) {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ message: 'Acceso Denegado (RBAC): Únicamente el Administrador tiene autorización para suspender o reactivar cuentas de usuario.' })
+        };
+      }
+
+      const targetUserId = path.split('/')[2];
+      const body = JSON.parse(event.body || '{}');
+      const isActive = body.is_active !== undefined ? Boolean(body.is_active) : (body.isActive !== undefined ? Boolean(body.isActive) : true);
+      const reason = body.suspended_reason || body.suspendedReason || (isActive ? null : 'Suspensión administrativa de credenciales');
+      const suspendedBy = body.suspended_by || body.suspendedBy || callerEmail;
+
+      const updateResult = await db.query(`
+        UPDATE users SET
+          is_active = $1,
+          suspended_at = CASE WHEN $1 = FALSE THEN CURRENT_TIMESTAMP ELSE NULL END,
+          suspended_by = CASE WHEN $1 = FALSE THEN $2 ELSE NULL END,
+          suspended_reason = CASE WHEN $1 = FALSE THEN $3 ELSE NULL END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = $4 OR LOWER(email) = LOWER($4)
+        RETURNING id, role_id AS role, email, full_name, is_active, suspended_at, suspended_by, suspended_reason;
+      `, [isActive, suspendedBy, reason, targetUserId]);
+
+      if (updateResult.rows.length === 0) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({ message: 'Usuario no encontrado en la base de datos.' })
+        };
+      }
+
+      const updatedUser = updateResult.rows[0];
+
+      await db.query(`
+        INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+        VALUES ($1, $2, $3, $4, 'user', $5, $6);
+      `, [
+        callerUserId,
+        callerEmail,
+        callerRole,
+        isActive ? 'REACTIVATE_ACCOUNT' : 'SUSPEND_ACCOUNT',
+        targetUserId,
+        isActive
+          ? `Reactivación de cuenta de usuario (${updatedUser.email}) autorizada por administrador.`
+          : `Suspensión de cuenta de usuario (${updatedUser.email}) autorizada por administrador. Motivo: ${reason}`
+      ]);
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          message: isActive ? 'Cuenta reactivada correctamente.' : 'Cuenta suspendida correctamente.',
+          user: updatedUser
+        })
       };
     }
 

@@ -10,7 +10,7 @@ import {
   AlertCircle, Eye, ArrowRight
 } from 'lucide-react'
 import { parseISO, addDays, format } from 'date-fns'
-import { getSystemUsers, saveSystemUsers } from '../services/auth'
+import { getSystemUsers, saveSystemUsers, updateSystemUserStatus } from '../services/auth'
 import { logAuditEvent } from '../utils/auditLogger'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
@@ -790,84 +790,75 @@ export default function UsersManagementPage() {
       return
     }
 
-    const nowIso = new Date().toISOString()
-    const updated = users.map(u => {
-      if (u.id === suspensionModalTarget.id) {
-        return {
-          ...u,
-          isActive: false,
-          suspendedAt: nowIso,
-          suspendedBy: user?.fullName || 'Administrador',
-          suspendedByUserId: user?.id || '',
-          suspendedReason: suspensionReason.trim() || 'Suspensión administrativa de credenciales',
+    try {
+      await updateSystemUserStatus(
+        suspensionModalTarget.id,
+        false,
+        suspensionReason.trim() || 'Suspensión administrativa de credenciales',
+        user
+      )
+
+      setUsers(getSystemUsers())
+
+      // Registrar en auditoría
+      if (user) {
+        try {
+          await logAuditEvent({
+            userId: user.id,
+            userEmail: user.email,
+            userRole: 'admin',
+            userName: user.fullName,
+            action: 'SUSPEND_ACCOUNT',
+            entityType: 'user',
+            entityId: suspensionModalTarget.id,
+            details: `Cuenta de ${suspensionModalTarget.fullName} (${suspensionModalTarget.email}) suspendida por ${user.fullName} el ${new Date().toLocaleString('es-ES')}. Motivo: ${suspensionReason.trim() || 'Suspensión administrativa de credenciales'}`
+          })
+        } catch (e) {
+          console.warn('Error registrando auditoría de suspensión:', e)
         }
       }
-      return u
-    })
 
-    setUsers(updated)
-    saveSystemUsers(updated)
-
-    // Registrar en auditoría
-    if (user) {
-      try {
-        await logAuditEvent({
-          userId: user.id,
-          userEmail: user.email,
-          userRole: 'admin',
-          userName: user.fullName,
-          action: 'SUSPEND_ACCOUNT',
-          entityType: 'user',
-          entityId: suspensionModalTarget.id,
-          details: `Cuenta de ${suspensionModalTarget.fullName} (${suspensionModalTarget.email}) suspendida por ${user.fullName} el ${new Date().toLocaleString('es-ES')}. Motivo: ${suspensionReason.trim() || 'Suspensión administrativa de credenciales'}`
-        })
-      } catch (e) {
-        console.warn('Error registrando auditoría de suspensión:', e)
-      }
+      setSuccessMsg(`Cuenta de ${suspensionModalTarget.fullName} suspendida. Se ha bloqueado su inicio de sesión conservando sus registros históricos.`)
+      setSuspensionModalTarget(null)
+      setTimeout(() => setSuccessMsg(null), 4000)
+    } catch (err: any) {
+      alert(err.message || 'Error al suspender cuenta')
     }
-
-    setSuccessMsg(`Cuenta de ${suspensionModalTarget.fullName} suspendida. Se ha bloqueado su inicio de sesión conservando sus registros históricos.`)
-    setSuspensionModalTarget(null)
-    setTimeout(() => setSuccessMsg(null), 4000)
   }
 
   const handleReactivateUser = async (targetUser: SystemUser) => {
-    const updated = users.map(u => {
-      if (u.id === targetUser.id) {
-        return {
-          ...u,
-          isActive: true,
-          suspendedAt: undefined,
-          suspendedBy: undefined,
-          suspendedByUserId: undefined,
-          suspendedReason: undefined,
+    try {
+      await updateSystemUserStatus(
+        targetUser.id,
+        true,
+        undefined,
+        user
+      )
+
+      setUsers(getSystemUsers())
+
+      if (user) {
+        try {
+          await logAuditEvent({
+            userId: user.id,
+            userEmail: user.email,
+            userRole: 'admin',
+            userName: user.fullName,
+            action: 'REACTIVATE_ACCOUNT',
+            entityType: 'user',
+            entityId: targetUser.id,
+            details: `Cuenta de ${targetUser.fullName} (${targetUser.email}) reactivada por ${user.fullName} el ${new Date().toLocaleString('es-ES')}.`
+          })
+        } catch (e) {
+          console.warn('Error registrando auditoría de reactivación:', e)
         }
       }
-      return u
-    })
 
-    setUsers(updated)
-    saveSystemUsers(updated)
-
-    if (user) {
-      try {
-        await logAuditEvent({
-          userId: user.id,
-          userEmail: user.email,
-          userRole: 'admin',
-          userName: user.fullName,
-          action: 'REACTIVATE_ACCOUNT',
-          entityType: 'user',
-          entityId: targetUser.id,
-          details: `Cuenta de ${targetUser.fullName} (${targetUser.email}) reactivada por ${user.fullName} el ${new Date().toLocaleString('es-ES')}.`
-        })
-      } catch (e) {
-        console.warn('Error registrando auditoría de reactivación:', e)
-      }
+      setSuccessMsg(`Cuenta de ${targetUser.fullName} reactivada con éxito. Ya puede iniciar sesión nuevamente.`)
+      setTimeout(() => setSuccessMsg(null), 4000)
+    } catch (err: any) {
+      alert(err.message || 'Error al reactivar cuenta')
     }
-
-    setSuccessMsg(`Cuenta de ${targetUser.fullName} reactivada con éxito. Ya puede iniciar sesión nuevamente.`)
-    setTimeout(() => setSuccessMsg(null), 4000)
   }
 
   // Filtrado de Usuarios (Búsqueda + Rol + Estado de Cuenta)

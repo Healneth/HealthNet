@@ -179,7 +179,7 @@ export default function SimulatorPage() {
         </div>
 
         {/* Stats bar */}
-        <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
           <div className="bg-white rounded-xl border border-hn-200 px-4 py-3 text-center">
             <p className="text-2xl font-extrabold text-hn-800">{rows.length}</p>
             <p className="text-xs text-hn-500">Dispositivos creados</p>

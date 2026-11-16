@@ -16,6 +16,8 @@ export interface ApiPatient {
   emergency_contact?: string
   room_number?: string
   floor?: string
+  bed_number?: string
+  bedNumber?: string
   assigned_nurse_id?: string
   assigned_nurse_name?: string
   medical_notes?: string
@@ -24,7 +26,12 @@ export interface ApiPatient {
   temp_max: string | number
   notifications_active: boolean
   watch_theme: 'light' | 'dark'
-  bracelet_status?: 'DISPONIBLE' | 'ASIGNADO' | 'MANTENIMIENTO'
+  bracelet_status?: 'DISPONIBLE' | 'ASIGNADO' | 'MANTENIMIENTO' | 'NO_EN_USO'
+  is_active?: boolean
+  is_archived?: boolean
+  archived_at?: string | number
+  archived_by?: string
+  archived_reason?: string
 }
 
 export interface PatientData {
@@ -42,6 +49,8 @@ export function mapDbPatientToState(dbPatient: ApiPatient): PatientData {
   const patientName = dbPatient.full_name || dbPatient.name || 'Paciente'
   const contactName = dbPatient.contact_name || dbPatient.emergency_contact || 'Familiar Responsable'
   const contactPhone = dbPatient.contact_phone || dbPatient.phone || '—'
+  const isArchived = Boolean(dbPatient.is_archived || dbPatient.is_active === false)
+  const archivedAt = dbPatient.archived_at ? (typeof dbPatient.archived_at === 'number' ? dbPatient.archived_at : new Date(dbPatient.archived_at).getTime()) : undefined
 
   return {
     deviceId: dbPatient.device_id,
@@ -60,9 +69,15 @@ export function mapDbPatientToState(dbPatient: ApiPatient): PatientData {
       emergencyContact: `${contactName} (${contactPhone})`,
       roomNumber: dbPatient.room_number || 'Hab. 101',
       floor: dbPatient.floor || 'Piso 1',
+      bedNumber: dbPatient.bed_number || dbPatient.bedNumber || 'Cama 1',
       assignedNurseId: dbPatient.assigned_nurse_id,
       assignedNurseName: dbPatient.assigned_nurse_name,
       medicalNotes: dbPatient.medical_notes || '',
+      isActive: !isArchived,
+      isArchived,
+      archivedAt,
+      archivedBy: dbPatient.archived_by,
+      archivedReason: dbPatient.archived_reason,
     },
     config: {
       hrMin: dbPatient.hr_min || 50,
@@ -147,9 +162,21 @@ class PatientsService {
         roomNumber: profile.roomNumber,
         room_number: profile.roomNumber,
         floor: profile.floor,
+        bedNumber: profile.bedNumber,
+        bed_number: profile.bedNumber,
         assigned_nurse_id: profile.assignedNurseId,
         assigned_nurse_name: profile.assignedNurseName,
         medicalNotes: profile.medicalNotes,
+        isArchived: profile.isArchived ?? false,
+        is_archived: profile.isArchived ?? false,
+        isActive: profile.isArchived ? false : (profile.isActive ?? true),
+        is_active: profile.isArchived ? false : (profile.isActive ?? true),
+        archivedAt: profile.archivedAt ? new Date(profile.archivedAt).toISOString() : null,
+        archived_at: profile.archivedAt ? new Date(profile.archivedAt).toISOString() : null,
+        archivedBy: profile.archivedBy || null,
+        archived_by: profile.archivedBy || null,
+        archivedReason: profile.archivedReason || null,
+        archived_reason: profile.archivedReason || null,
         hrMin: config.hrMin,
         hrMax: config.hrMax,
         tempMax: config.tempMax,
@@ -348,6 +375,78 @@ class PatientsService {
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
     } catch (err) {
       console.error('[PatientsService] Error borrando alertas:', err)
+    }
+  }
+
+  /**
+   * Archiva un paciente en el backend cloud preservando su expediente
+   */
+  async archivePatient(deviceId: string, reason?: string, archivedBy?: string): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/patients/${deviceId}/archive`, {
+        method: 'PUT',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ reason, archivedBy })
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
+      }
+    } catch (err) {
+      console.error(`[PatientsService] Error archivando paciente ${deviceId}:`, err)
+      throw err
+    }
+  }
+
+  /**
+   * Reactiva un paciente archivado en el backend cloud
+   */
+  async unarchivePatient(deviceId: string): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/patients/${deviceId}/unarchive`, {
+        method: 'PUT',
+        headers: getAuthHeaders()
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
+      }
+    } catch (err) {
+      console.error(`[PatientsService] Error reactivando paciente ${deviceId}:`, err)
+      throw err
+    }
+  }
+
+  /**
+   * Actualiza el estado de una cuenta de usuario (suspensión / reactivación)
+   */
+  async updateUserStatus(userId: string, isActive: boolean, reason?: string, suspendedBy?: string): Promise<void> {
+    if (!isApiConfigured()) return
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/users/${userId}/status`, {
+        method: 'PUT',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          is_active: isActive,
+          suspended_reason: reason,
+          suspended_by: suspendedBy
+        })
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
+      }
+    } catch (err) {
+      console.error(`[PatientsService] Error actualizando estado de usuario ${userId}:`, err)
+      throw err
     }
   }
 }
