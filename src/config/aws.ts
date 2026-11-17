@@ -20,7 +20,7 @@ export const AWS_CONFIG = {
   },
 
   // API Gateway
-  apiEndpoint: import.meta.env.VITE_API_ENDPOINT || '',
+  apiEndpoint: import.meta.env.VITE_API_URL || import.meta.env.VITE_API_ENDPOINT || '',
 } as const
 
 // ──────────────────────────────────────────────────────────────────────
@@ -35,6 +35,13 @@ export const amplifyConfig = {
     },
   },
 }
+
+/** Devuelve true si Cognito está configurado para autenticación */
+export const isCognitoConfigured = () =>
+  Boolean(
+    AWS_CONFIG.cognito.userPoolId &&
+    AWS_CONFIG.cognito.userPoolClientId
+  )
 
 /** Devuelve true si las variables de entorno de AWS están configuradas */
 export const isAwsConfigured = () =>

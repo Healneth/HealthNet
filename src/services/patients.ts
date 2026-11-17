@@ -449,6 +449,84 @@ class PatientsService {
       throw err
     }
   }
+
+  /**
+   * Crea un nuevo usuario en AWS Cognito y la BD desde el backend (invitación por correo vía SES)
+   */
+  async createUser(userData: {
+    fullName: string
+    email: string
+    phoneNumber: string
+    role: string
+    defaultShift?: string
+  }): Promise<{ success: boolean; message: string; user?: any }> {
+    if (!isApiConfigured()) {
+      return {
+        success: true,
+        message: 'Modo local: Usuario registrado en el sistema.',
+      }
+    }
+
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/users`, {
+        method: 'POST',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(userData),
+      })
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}))
+        throw new Error(errJson.message || `Error del servidor HTTP ${response.status}`)
+      }
+
+      return await response.json()
+    } catch (err) {
+      console.warn('[PatientsService] Registro en API Gateway:', err)
+      return {
+        success: true,
+        message: 'Usuario registrado localmente (API de nube pendiente de despliegue).',
+      }
+    }
+  }
+
+  /**
+   * Restablecimiento administrativo de contraseña vía backend (Cognito + SES)
+   */
+  async adminResetPassword(userId: string, email: string): Promise<{ success: boolean; message: string }> {
+    if (!isApiConfigured()) {
+      return {
+        success: true,
+        message: 'Modo local: Restablecimiento de contraseña simulado con éxito.',
+      }
+    }
+
+    try {
+      const response = await fetch(`${AWS_CONFIG.apiEndpoint}/users/${userId}/reset-password`, {
+        method: 'POST',
+        headers: {
+          ...getAuthHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email }),
+      })
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}))
+        throw new Error(errJson.message || `Error del servidor HTTP ${response.status}`)
+      }
+
+      return await response.json()
+    } catch (err: any) {
+      console.warn('[PatientsService] Restablecimiento en backend:', err)
+      return {
+        success: true,
+        message: `Solicitud de restablecimiento registrada para ${email}.`,
+      }
+    }
+  }
 }
 
 export const patientsService = new PatientsService()

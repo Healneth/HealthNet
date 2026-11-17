@@ -3,9 +3,10 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Activity, Bell, User, Users, Cpu,
   LogOut, Sun, Moon, Menu, X, Shield, Stethoscope, HeartHandshake,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, KeyRound
 } from 'lucide-react'
 import Logo from './Logo'
+import ChangePasswordModal from './ChangePasswordModal'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
 import type { UserRole } from '../types'
@@ -24,6 +25,7 @@ export default function Sidebar() {
   const navigate = useNavigate()
 
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false)
 
   // Store details
   const theme = useDeviceStore(s => s.theme)
@@ -266,6 +268,20 @@ export default function Sidebar() {
 
             <div className="relative group">
               <button
+                onClick={() => setChangePasswordOpen(true)}
+                className="p-2 rounded-xl text-slate-400 hover:text-[#637fa8] hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Cambiar contraseña"
+              >
+                <KeyRound size={17} />
+              </button>
+              <div className="fixed left-20 ml-2 px-2.5 py-1 bg-slate-900 dark:bg-slate-800 text-white text-xs font-bold rounded-lg shadow-2xl whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-all duration-200 z-50 border border-slate-700/60">
+                Cambiar contraseña
+                <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-slate-900 dark:border-r-slate-800" />
+              </div>
+            </div>
+
+            <div className="relative group">
+              <button
                 onClick={handleLogout}
                 className="p-2 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
                 title="Cerrar sesión"
@@ -298,13 +314,22 @@ export default function Sidebar() {
                 </div>
               </div>
 
-              <button
-                onClick={handleLogout}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer flex-shrink-0"
-                title="Cerrar sesión"
-              >
-                <LogOut size={16} />
-              </button>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <button
+                  onClick={() => setChangePasswordOpen(true)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-[#637fa8] hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                  title="Cambiar contraseña"
+                >
+                  <KeyRound size={15} />
+                </button>
+                <button
+                  onClick={handleLogout}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
+                  title="Cerrar sesión"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -350,6 +375,11 @@ export default function Sidebar() {
           </div>
         </div>
       )}
+      {/* Modal para Cambiar Contraseña */}
+      <ChangePasswordModal
+        isOpen={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+      />
     </>
   )
 }

@@ -1,25 +1,30 @@
--- ──────────────────────────────────────────────────────────────────────
--- HEALTH NET — Esquema Maestro Consolidado de Base de Datos Relacional v8.0
--- Diseñado para Amazon Aurora PostgreSQL / PostgreSQL 14+
--- Incluye:
--- 1. Control de Acceso Basado en Roles (RBAC: Admin, Doctor, Enfermero).
--- 2. Cuentas de Personal y Auditoría de Suspensión Administrativa.
--- 3. Expediente de Pacientes con Archivado Asistencial y Ubicación Hospitalaria.
--- 4. Brazaletes Hardware IoT Desacoplados (con estados 'DISPONIBLE', 'ASIGNADO', 'MANTENIMIENTO', 'NO_EN_USO').
---    (Excepción aplicada: Se omitieron 'model' y 'battery_level' de la tabla bracelets según requerimiento).
--- 5. Umbrales Clínicos Personalizados y Calibración Médica.
--- 6. Historial de Telemetría y Constantes Vitales (Preservación histórica sin destrucción en cascada).
--- 7. Configuración de Horarios del Centro y Programación Semanal de Turnos de Enfermería.
--- 8. Asignación Territorial de Pacientes por Turno (hasta 3 enfermeros por paciente).
--- 9. Sistema de Tickets Clínicos, Bitácora Inmutable de Notas, Entregas de Turno (Transfers) y Trazabilidad.
--- 10. Bitácora General de Auditoría Administrativa y Clínica (audit_log).
--- ──────────────────────────────────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════
+-- HEALTH NET — ESQUEMA MAESTRO CONSOLIDADO Y DEFINITIVO DE BASE DE DATOS (AWS RDS)
+-- Versión: 9.0 Consolidada
+-- Motor: PostgreSQL 13, 14, 15, 16+ (Amazon RDS / Aurora PostgreSQL)
+-- ══════════════════════════════════════════════════════════════════════════
+-- Características Clave:
+-- 1. 100% Idempotente: Ejecutable en bases de datos nuevas o existentes sin conflicto.
+-- 2. Integridad Referencial Estricta: Relaciones PK/FK con UUIDs y claves naturales.
+-- 3. Preservación Histórica: Evita borrado destructivo en cascada (ON DELETE SET NULL / RESTRICT).
+-- 4. Soporte Total de RBAC: Administrador, Doctor y Enfermero.
+-- 5. Suspensión Administrativa de Cuentas (is_active, suspended_at, suspended_by, suspended_reason).
+-- 6. Archivado Clínico de Pacientes (is_archived, archived_at, archived_by, archived_reason).
+-- 7. Desacoplamiento de Brazaletes IoT ('DISPONIBLE', 'ASIGNADO', 'MANTENIMIENTO', 'NO_EN_USO').
+-- 8. Rotación Semanal de Turnos y Asignación Territorial de Pacientes (hasta 3 enfermeros).
+-- 9. Sistema Integral de Tickets Clínicos, Bitácora Inmutable de Notas y Entregas de Turno.
+-- 10. Bitácora de Trazabilidad y Auditoría (audit_log).
+-- ══════════════════════════════════════════════════════════════════════════
 
+BEGIN;
+
+-- ──────────────────────────────────────────────────────────────────────
+-- EXTENSIONES
+-- ──────────────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ──────────────────────────────────────────────────────────────────────
--- 1. TABLA: roles
--- Catálogo de roles para control de acceso RBAC
+-- 1. TABLA: roles (Catálogo RBAC)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS roles (
     id VARCHAR(20) PRIMARY KEY,
@@ -28,16 +33,15 @@ CREATE TABLE IF NOT EXISTS roles (
 );
 
 INSERT INTO roles (id, name, description) VALUES
-('admin', 'Administrador', 'Control integral del sistema, gestión de usuarios, roles, programación de turnos y centro'),
-('doctor', 'Doctor / Médico', 'Lectura clínica avanzada, diagnóstico, historial acumulado y calibración de umbrales clínicos'),
-('nurse', 'Enfermero / Personal Asistencial', 'Consulta de pacientes, atención de alertas, registro de notas de bitácora y entregas de turno')
+('admin', 'Administrador', 'Control integral del sistema, gestión de usuarios, roles, turnos y centro asistencial'),
+('doctor', 'Doctor / Médico', 'Lectura clínica avanzada, diagnóstico, historial acumulado y calibración de umbrales'),
+('nurse', 'Enfermero / Personal Asistencial', 'Atención directa de pacientes, resolución de alertas, bitácora clínica y entregas de turno')
 ON CONFLICT (id) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description;
 
 -- ──────────────────────────────────────────────────────────────────────
--- 2. TABLA: facility_shift_config
--- Horarios institucionales de referencia por turno (Configurable por Administrador)
+-- 2. TABLA: facility_shift_config (Horarios Institucionales del Centro)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS facility_shift_config (
     id VARCHAR(20) PRIMARY KEY, -- 'matutino', 'vespertino', 'nocturno'
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS facility_shift_config (
 
 INSERT INTO facility_shift_config (id, name, start_time, end_time, description) VALUES
 ('matutino', 'Matutino', '07:00:00', '15:00:00', 'Turno matutino habitual de atención clínica'),
-('vespertino', 'Vespertino', '15:00:00', '23:00:00', 'Turno vespertino habitual de seguimiento'),
+('vespertino', 'Vespertino', '15:00:00', '23:00:00', 'Turno vespertino habitual de seguimiento asistencial'),
 ('nocturno', 'Nocturno', '23:00:00', '07:00:00', 'Turno nocturno / velada de supervisión')
 ON CONFLICT (id) DO UPDATE SET
     name = EXCLUDED.name,
@@ -59,9 +63,7 @@ ON CONFLICT (id) DO UPDATE SET
     description = EXCLUDED.description;
 
 -- ──────────────────────────────────────────────────────────────────────
--- 3. TABLA: users
--- Cuentas de usuario del personal asistencial y administrativo
--- Soporta suspensión de cuenta con registro de motivo y responsable.
+-- 3. TABLA: users (Personal Clínico y Administrativo)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -85,9 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_users_is_active ON users (is_active);
 CREATE INDEX IF NOT EXISTS idx_users_suspended_at ON users (suspended_at);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 4. TABLA: patients
--- Expediente personal y médico básico del adulto mayor (independiente del hardware)
--- Soporta archivado (baja/alta asistencial) con conservación histórica íntegra.
+-- 4. TABLA: patients (Expediente Clínico del Adulto Mayor)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patients (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -117,11 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_patients_full_name ON patients (LOWER(full_name))
 CREATE INDEX IF NOT EXISTS idx_patients_is_active ON patients (is_active);
 CREATE INDEX IF NOT EXISTS idx_patients_is_archived ON patients (is_archived);
 CREATE INDEX IF NOT EXISTS idx_patients_assigned_nurse ON patients (assigned_nurse_id);
-CREATE INDEX IF NOT EXISTS idx_patients_location ON patients (floor, room_number);
+CREATE INDEX IF NOT EXISTS idx_patients_location ON patients (floor, room_number, bed_number);
 
 -- ──────────────────────────────────────────────────────────────────────
 -- 5. TABLA: bracelets (Hardware IoT Desacoplado)
--- Admite estados 'DISPONIBLE', 'ASIGNADO', 'MANTENIMIENTO', 'NO_EN_USO'
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bracelets (
     device_id VARCHAR(50) PRIMARY KEY,
@@ -135,8 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_bracelets_patient_id ON bracelets (patient_id);
 CREATE INDEX IF NOT EXISTS idx_bracelets_status ON bracelets (status);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 6. TABLA: patient_thresholds
--- Calibración médica personalizada de alertas por paciente
+-- 6. TABLA: patient_thresholds (Calibración Médica de Alertas)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patient_thresholds (
     patient_id UUID PRIMARY KEY REFERENCES patients(id) ON DELETE CASCADE,
@@ -151,9 +149,8 @@ CREATE TABLE IF NOT EXISTS patient_thresholds (
 );
 
 -- ──────────────────────────────────────────────────────────────────────
--- 7. TABLA: clinical_measurements
--- Historial cronológico de constantes vitales (telemetría IoT y simulada)
--- Preservación histórica: Desvincular un brazalete NO elimina las mediciones.
+-- 7. TABLA: clinical_measurements (Constantes Vitales y Telemetría)
+-- Preservación Histórica: Desvincular brazalete NO elimina mediciones (SET NULL).
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS clinical_measurements (
     id BIGSERIAL PRIMARY KEY,
@@ -175,9 +172,8 @@ CREATE INDEX IF NOT EXISTS idx_measurements_device_time ON clinical_measurements
 CREATE INDEX IF NOT EXISTS idx_measurements_simulated ON clinical_measurements (is_simulated);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 8. TABLA: nurse_shift_assignments
--- Programación semanal y rotaciones de turnos de enfermeros
--- Preserva histórico: RESTRICT impide borrado accidental de historial de turnos.
+-- 8. TABLA: nurse_shift_assignments (Programación Semanal de Turnos)
+-- Preservación Histórica: ON DELETE RESTRICT en users para proteger historial.
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS nurse_shift_assignments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -197,15 +193,13 @@ CREATE INDEX IF NOT EXISTS idx_nurse_shifts_week ON nurse_shift_assignments (wee
 CREATE INDEX IF NOT EXISTS idx_nurse_shifts_type ON nurse_shift_assignments (shift_type);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 9. TABLA: patient_shift_assignments
--- Asignación territorial de pacientes a enfermeros por turno
--- Un paciente puede tener hasta 3 enfermeros asignados (uno por turno).
--- Un enfermero puede tener múltiples pacientes a cargo.
+-- 9. TABLA: patient_shift_assignments (Asignación Territorial por Turno)
+-- Soporta hasta 3 enfermeros asignados (uno por turno) para un mismo paciente.
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patient_shift_assignments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    patient_id VARCHAR(50) NOT NULL, -- Compatibilidad con identificador de hardware / frontend
-    patient_uuid UUID REFERENCES patients(id) ON DELETE SET NULL, -- Enlace relacional estricto
+    patient_id VARCHAR(50) NOT NULL,
+    patient_uuid UUID REFERENCES patients(id) ON DELETE SET NULL,
     patient_name VARCHAR(150) NOT NULL,
     room_number VARCHAR(50),
     floor VARCHAR(50),
@@ -232,9 +226,7 @@ CREATE INDEX IF NOT EXISTS idx_psa_week ON patient_shift_assignments (week_start
 CREATE INDEX IF NOT EXISTS idx_psa_shift ON patient_shift_assignments (shift_type);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 10. TABLA: alerts
--- Eventos clínicos y técnicos clasificados por criticidad
--- Preservación histórica: Desvincular brazalete NO elimina las alertas.
+-- 10. TABLA: alerts (Alertas Médicas y de Dispositivo)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS alerts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -259,8 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_assigned_nurse ON alerts (assigned_nurse_id);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 11. TABLA: alert_tracking
--- Bitácora complementaria de seguimiento de alertas clínicas
+-- 11. TABLA: alert_tracking (Seguimiento Clínico de Alertas)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS alert_tracking (
     id BIGSERIAL PRIMARY KEY,
@@ -275,8 +266,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_tracking_alert_id ON alert_tracking (alert_
 CREATE INDEX IF NOT EXISTS idx_alert_tracking_user_id ON alert_tracking (user_id);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 12. TABLA: notifications
--- Registro de avisos y notificaciones clínicas enviadas al personal
+-- 12. TABLA: notifications (Despacho de Mensajería SMS / Push)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notifications (
     id BIGSERIAL PRIMARY KEY,
@@ -291,8 +281,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_alert_id ON notifications (alert_id);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 13. SISTEMA DE TICKETS DE ALERTAS CLÍNICAS (v6.0 - v8.0)
--- Gestión de incidentes con folio único, criticidad y ciclo de vida formal.
+-- 13. TABLAS DE TICKETS CLÍNICOS: tickets, ticket_notes, ticket_transfers, ticket_activity
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS tickets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -332,7 +321,7 @@ CREATE INDEX IF NOT EXISTS idx_tickets_criticality ON tickets (criticality);
 CREATE INDEX IF NOT EXISTS idx_tickets_shift ON tickets (shift_type);
 CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets (created_at DESC);
 
--- Bitácora inmutable de notas clínicas
+-- Notas Clínicas Inmutables
 CREATE TABLE IF NOT EXISTS ticket_notes (
     id BIGSERIAL PRIMARY KEY,
     ticket_id UUID NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
@@ -346,7 +335,7 @@ CREATE TABLE IF NOT EXISTS ticket_notes (
 
 CREATE INDEX IF NOT EXISTS idx_ticket_notes_ticket_id ON ticket_notes (ticket_id, created_at ASC);
 
--- Historial formal de entregas de turno (handoff)
+-- Historial Formal de Entregas de Turno (Transfers)
 CREATE TABLE IF NOT EXISTS ticket_transfers (
     id BIGSERIAL PRIMARY KEY,
     ticket_id UUID NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
@@ -361,7 +350,7 @@ CREATE TABLE IF NOT EXISTS ticket_transfers (
 
 CREATE INDEX IF NOT EXISTS idx_ticket_transfers_ticket_id ON ticket_transfers (ticket_id);
 
--- Línea de tiempo de auditoría y ciclo de vida de tickets
+-- Línea de Tiempo de Auditoría de Tickets
 CREATE TABLE IF NOT EXISTS ticket_activity (
     id BIGSERIAL PRIMARY KEY,
     ticket_id UUID NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
@@ -376,8 +365,7 @@ CREATE TABLE IF NOT EXISTS ticket_activity (
 CREATE INDEX IF NOT EXISTS idx_ticket_activity_ticket_id ON ticket_activity (ticket_id, created_at ASC);
 
 -- ──────────────────────────────────────────────────────────────────────
--- 14. TABLA: audit_log
--- Bitácora general de trazabilidad para modificaciones administrativas y clínicas
+-- 14. TABLA: audit_log (Bitácora Integral del Sistema)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_log (
     id BIGSERIAL PRIMARY KEY,
@@ -400,7 +388,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log (action);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at DESC);
 
 -- ──────────────────────────────────────────────────────────────────────
--- FUNCIONES Y TRIGGERS DE ACTUALIZACIÓN AUTOMÁTICA
+-- TRIGGERS DE ACTUALIZACIÓN AUTOMÁTICA (Compatibilidad PostgreSQL 12+)
 -- ──────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_timestamp_column()
 RETURNS TRIGGER AS $$
@@ -410,32 +398,38 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE TRIGGER trg_patients_updated_at
+DROP TRIGGER IF EXISTS trg_patients_updated_at ON patients;
+CREATE TRIGGER trg_patients_updated_at
     BEFORE UPDATE ON patients
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
 
-CREATE OR REPLACE TRIGGER trg_patient_thresholds_updated_at
+DROP TRIGGER IF EXISTS trg_patient_thresholds_updated_at ON patient_thresholds;
+CREATE TRIGGER trg_patient_thresholds_updated_at
     BEFORE UPDATE ON patient_thresholds
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
 
-CREATE OR REPLACE TRIGGER trg_users_updated_at
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
+CREATE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
 
-CREATE OR REPLACE TRIGGER trg_nurse_shifts_updated_at
+DROP TRIGGER IF EXISTS trg_nurse_shifts_updated_at ON nurse_shift_assignments;
+CREATE TRIGGER trg_nurse_shifts_updated_at
     BEFORE UPDATE ON nurse_shift_assignments
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
 
-CREATE OR REPLACE TRIGGER trg_patient_shifts_updated_at
+DROP TRIGGER IF EXISTS trg_patient_shifts_updated_at ON patient_shift_assignments;
+CREATE TRIGGER trg_patient_shifts_updated_at
     BEFORE UPDATE ON patient_shift_assignments
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
 
-CREATE OR REPLACE TRIGGER trg_tickets_updated_at
+DROP TRIGGER IF EXISTS trg_tickets_updated_at ON tickets;
+CREATE TRIGGER trg_tickets_updated_at
     BEFORE UPDATE ON tickets
     FOR EACH ROW
     EXECUTE FUNCTION update_timestamp_column();
@@ -450,3 +444,5 @@ INSERT INTO users (id, role_id, email, full_name, phone_number, is_active, defau
 ('a0000000-0000-0000-0000-000000000004', 'nurse', 'ana.ruiz@healthnet.com', 'Lic. Ana Ruiz Morales', '+52 664 456 7890', TRUE, 'vespertino'),
 ('a0000000-0000-0000-0000-000000000005', 'nurse', 'elena.soto@healthnet.com', 'Lic. Elena Soto Vargas', '+52 664 567 8901', TRUE, 'nocturno')
 ON CONFLICT (email) DO NOTHING;
+
+COMMIT;

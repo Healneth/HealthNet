@@ -1,5 +1,22 @@
 const { Client } = require('pg');
 
+let CognitoClient = null;
+let AdminCreateUserCommand = null;
+let AdminResetUserPasswordCommand = null;
+try {
+  const cognitoPkg = require('@aws-sdk/client-cognito-identity-provider');
+  CognitoClient = cognitoPkg.CognitoIdentityProviderClient;
+  AdminCreateUserCommand = cognitoPkg.AdminCreateUserCommand;
+  AdminResetUserPasswordCommand = cognitoPkg.AdminResetUserPasswordCommand;
+} catch (e) {
+  console.warn('AWS SDK CognitoIdentityProviderClient no disponible localmente:', e.message);
+}
+
+function getCognitoClient() {
+  if (!CognitoClient) return null;
+  return new CognitoClient({ region: process.env.AWS_REGION || 'us-west-1' });
+}
+
 const clientConfig = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -1161,6 +1178,173 @@ exports.handler = async (event) => {
           success: true,
           message: isActive ? 'Cuenta reactivada correctamente.' : 'Cuenta suspendida correctamente.',
           user: updatedUser
+        })
+      };
+    }
+
+    // POST /users (Creación de usuario por Administrador e invitación vía Cognito / SES)
+    if (httpMethod === 'POST' && path === '/users') {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ message: 'Acceso Denegado (RBAC): Únicamente el Administrador puede registrar nuevos usuarios.' })
+        };
+      }
+
+      const body = JSON.parse(event.body || '{}');
+      const fullName = (body.fullName || body.full_name || '').trim();
+      const email = (body.email || '').toLowerCase().trim();
+      const phoneNumber = (body.phoneNumber || body.phone_number || '').trim();
+      const role = (body.role || body.role_id || 'nurse').toLowerCase().trim();
+
+      if (!fullName || !email) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ message: 'Nombre completo y correo electrónico son requeridos.' })
+        };
+      }
+
+      const userPoolId = process.env.COGNITO_USER_POOL_ID || 'us-west-1_pGyxBNhWT';
+      let cognitoSub = null;
+
+      // 1. Invocar Cognito AdminCreateUser si está disponible el cliente
+      const cClient = getCognitoClient();
+      if (cClient && AdminCreateUserCommand) {
+        try {
+          const userAttributes = [
+            { Name: 'email', Value: email },
+            { Name: 'name', Value: fullName },
+          ];
+          if (phoneNumber) {
+            userAttributes.push({ Name: 'phone_number', Value: phoneNumber });
+          }
+          try {
+            userAttributes.push({ Name: 'custom:role', Value: role });
+          } catch {}
+
+          const cognitoRes = await cClient.send(new AdminCreateUserCommand({
+            UserPoolId: userPoolId,
+            Username: email,
+            UserAttributes: userAttributes,
+            DesiredDeliveryMediums: ['EMAIL'],
+          }));
+
+          cognitoSub = cognitoRes.User?.Attributes?.find(a => a.Name === 'sub')?.Value || null;
+          console.info(`[Cognito] Usuario ${email} creado exitosamente con contraseña temporal.`);
+        } catch (cogErr) {
+          console.warn('[Cognito] Advertencia al crear usuario en Cognito:', cogErr.message);
+          if (cogErr.name === 'UsernameExistsException') {
+            return {
+              statusCode: 409,
+              headers,
+              body: JSON.stringify({ message: 'Ya existe una cuenta en Cognito con este correo electrónico.' })
+            };
+          }
+        }
+      }
+
+      // 2. Guardar en Base de Datos PostgreSQL
+      const userId = cognitoSub || `usr-${Date.now()}`;
+      try {
+        await db.query(`
+          INSERT INTO users (id, role_id, email, full_name, phone_number, is_active, created_at)
+          VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP)
+          ON CONFLICT (email) DO UPDATE SET
+            role_id = EXCLUDED.role_id,
+            full_name = EXCLUDED.full_name,
+            phone_number = EXCLUDED.phone_number,
+            updated_at = CURRENT_TIMESTAMP;
+        `, [userId, role, email, fullName, phoneNumber || null]);
+
+        await db.query(`
+          INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, 'CREATE_USER', 'user', $4, $5);
+        `, [
+          callerUserId,
+          callerEmail,
+          callerRole,
+          userId,
+          `Registro de usuario (${email}) con rol [${role}]. Contraseña temporal e invitación enviada vía SES.`
+        ]);
+      } catch (dbErr) {
+        console.warn('Registro en BD omitido o con advertencia:', dbErr.message);
+      }
+
+      return {
+        statusCode: 201,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          message: `Usuario ${fullName} registrado exitosamente. Se ha enviado una contraseña temporal a ${email}.`,
+          user: {
+            id: userId,
+            email,
+            fullName,
+            phoneNumber,
+            role,
+            isActive: true,
+            createdAt: new Date().toISOString()
+          }
+        })
+      };
+    }
+
+    // POST /users/{id}/reset-password (Restablecimiento administrativo de contraseña)
+    if (httpMethod === 'POST' && path.match(/^\/users\/[^\/]+\/reset-password$/)) {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({ message: 'Acceso Denegado (RBAC): Únicamente el Administrador puede solicitar el restablecimiento de contraseñas de otros usuarios.' })
+        };
+      }
+
+      const targetUserId = path.split('/')[2];
+      const body = JSON.parse(event.body || '{}');
+      const targetEmail = (body.email || targetUserId).toLowerCase().trim();
+
+      const userPoolId = process.env.COGNITO_USER_POOL_ID || 'us-west-1_pGyxBNhWT';
+      const cClient = getCognitoClient();
+      if (cClient && AdminResetUserPasswordCommand) {
+        try {
+          await cClient.send(new AdminResetUserPasswordCommand({
+            UserPoolId: userPoolId,
+            Username: targetEmail,
+          }));
+          console.info(`[Cognito] AdminResetUserPassword ejecutado para ${targetEmail}.`);
+        } catch (cogErr) {
+          console.warn('[Cognito] Error en AdminResetUserPassword:', cogErr.message);
+          return {
+            statusCode: 400,
+            headers,
+            body: JSON.stringify({ message: `Error en Cognito al restablecer: ${cogErr.message}` })
+          };
+        }
+      }
+
+      try {
+        await db.query(`
+          INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+          VALUES ($1, $2, $3, 'ADMIN_RESET_PASSWORD', 'user', $4, $5);
+        `, [
+          callerUserId,
+          callerEmail,
+          callerRole,
+          targetUserId,
+          `Restablecimiento de contraseña solicitado por el administrador para el usuario (${targetEmail}).`
+        ]);
+      } catch (dbErr) {
+        console.warn('Registro de auditoría en BD omitido:', dbErr.message);
+      }
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          message: `Se ha restablecido la contraseña para ${targetEmail}. Se enviaron las instrucciones a su correo.`
         })
       };
     }

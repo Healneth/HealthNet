@@ -159,7 +159,7 @@ export interface AuditLogEntry {
   userEmail: string
   userRole: UserRole
   userName: string
-  action: 'UPDATE_PROFILE' | 'UPDATE_VITALS' | 'UPDATE_THRESHOLDS' | 'ASSIGN_NURSE' | 'ATTEND_ALERT' | 'REGISTER_PATIENT' | 'DELETE_PATIENT' | 'ARCHIVE_PATIENT' | 'UNARCHIVE_PATIENT' | 'SUSPEND_ACCOUNT' | 'REACTIVATE_ACCOUNT'
+  action: 'UPDATE_PROFILE' | 'UPDATE_VITALS' | 'UPDATE_THRESHOLDS' | 'ASSIGN_NURSE' | 'ATTEND_ALERT' | 'REGISTER_PATIENT' | 'DELETE_PATIENT' | 'ARCHIVE_PATIENT' | 'UNARCHIVE_PATIENT' | 'SUSPEND_ACCOUNT' | 'REACTIVATE_ACCOUNT' | 'CREATE_USER' | 'ADMIN_RESET_PASSWORD'
   entityType: 'patient' | 'thresholds' | 'alert' | 'bracelet' | 'user' | 'ticket' | 'ticket_note' | 'ticket_transfer'
   entityId: string
   details?: string

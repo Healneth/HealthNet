@@ -7,10 +7,11 @@ import {
   Activity, Calendar, Clock, Sun, Sunset, Moon, ChevronLeft, ChevronRight,
   SlidersHorizontal, RotateCcw, AlertTriangle, Info, CalendarDays, History as HistoryIcon,
   Filter, Check, Sparkles, UserMinus, Plus, CheckSquare, Square,
-  AlertCircle, Eye, ArrowRight
+  AlertCircle, Eye, ArrowRight, KeyRound
 } from 'lucide-react'
 import { parseISO, addDays, format } from 'date-fns'
 import { getSystemUsers, saveSystemUsers, updateSystemUserStatus } from '../services/auth'
+import { patientsService } from '../services/patients'
 import { logAuditEvent } from '../utils/auditLogger'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
@@ -747,6 +748,21 @@ export default function UsersManagementPage() {
       setUsers(updated)
       saveSystemUsers(updated)
 
+      // Invocar creación en backend / AWS Cognito (envío de invitación por correo vía SES)
+      patientsService.createUser({
+        fullName: newUser.fullName,
+        email: newUser.email,
+        phoneNumber: newUser.phoneNumber,
+        role: newUser.role,
+        defaultShift: newUser.defaultShift,
+      }).then(res => {
+        if (res.message) {
+          setSuccessMsg(res.message)
+        }
+      }).catch(err => {
+        console.warn('[UsersManagement] Creación en API Gateway:', err)
+      })
+
       // Si es enfermero, programar automáticamente su turno inicial en la semana en curso
       if (role === 'nurse') {
         try {
@@ -858,6 +874,34 @@ export default function UsersManagementPage() {
       setTimeout(() => setSuccessMsg(null), 4000)
     } catch (err: any) {
       alert(err.message || 'Error al reactivar cuenta')
+    }
+  }
+
+  // Restablecimiento de contraseña solicitado por el Administrador (Cognito + SES)
+  const handleAdminResetPassword = async (targetUser: SystemUser) => {
+    const confirmAction = window.confirm(
+      `¿Deseas solicitar el restablecimiento de contraseña para ${targetUser.fullName} (${targetUser.email})?\n\nCognito generará un código o enlace de recuperación enviado vía Amazon SES.`
+    )
+    if (!confirmAction) return
+
+    try {
+      const res = await patientsService.adminResetPassword(targetUser.id, targetUser.email)
+      if (user) {
+        logAuditEvent({
+          userId: user.id,
+          userEmail: user.email,
+          userRole: 'admin',
+          userName: user.fullName,
+          action: 'ADMIN_RESET_PASSWORD',
+          entityType: 'user',
+          entityId: targetUser.id,
+          details: `Restablecimiento de contraseña iniciado por el administrador para ${targetUser.email} vía Cognito/SES`,
+        })
+      }
+      setSuccessMsg(res.message || `Instrucciones enviadas a ${targetUser.email}.`)
+      setTimeout(() => setSuccessMsg(null), 5000)
+    } catch (err: any) {
+      alert(err.message || 'Error al solicitar el restablecimiento de contraseña.')
     }
   }
 
@@ -1433,6 +1477,15 @@ export default function UsersManagementPage() {
                                 >
                                   <Edit2 size={12} />
                                   <span>Editar</span>
+                                </button>
+
+                                <button
+                                  onClick={() => handleAdminResetPassword(userItem)}
+                                  className="px-2.5 py-1.5 rounded-lg border border-sky-200 dark:border-sky-800/60 bg-sky-50 dark:bg-sky-950/30 hover:bg-sky-100 dark:hover:bg-sky-900/40 text-[#637fa8] dark:text-sky-300 text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1"
+                                  title="Solicitar restablecimiento de contraseña vía Cognito/SES"
+                                >
+                                  <KeyRound size={12} />
+                                  <span>Restablecer</span>
                                 </button>
 
                                 {userItem.isActive ? (
