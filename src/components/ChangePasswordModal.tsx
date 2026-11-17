@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { KeyRound, Eye, EyeOff, CheckCircle2, AlertCircle, X, Lock } from 'lucide-react'
 import { useAuth } from '../hooks/useAuth'
+import { validatePasswordPolicy } from '../utils/passwordValidator'
 
 interface ChangePasswordModalProps {
   isOpen: boolean
@@ -43,8 +44,9 @@ export default function ChangePasswordModal({ isOpen, onClose }: ChangePasswordM
       setError('Por favor ingresa tu contraseña actual.')
       return
     }
-    if (newPassword.length < 8) {
-      setError('La nueva contraseña debe contener al menos 8 caracteres.')
+    const policy = validatePasswordPolicy(newPassword)
+    if (!policy.isValid) {
+      setError(policy.errorMessage || 'La nueva contraseña debe contener al menos 12 caracteres, mayúsculas, minúsculas, números y caracteres especiales.')
       return
     }
     if (newPassword !== confirmPassword) {
@@ -159,8 +161,8 @@ export default function ChangePasswordModal({ isOpen, onClose }: ChangePasswordM
                 value={newPassword}
                 onChange={e => setNewPassword(e.target.value)}
                 required
-                minLength={8}
-                placeholder="Mínimo 8 caracteres"
+                minLength={12}
+                placeholder="Mínimo 12 caracteres"
                 className="w-full pl-3.5 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
               />
               <button
@@ -184,7 +186,7 @@ export default function ChangePasswordModal({ isOpen, onClose }: ChangePasswordM
                 value={confirmPassword}
                 onChange={e => setConfirmPassword(e.target.value)}
                 required
-                minLength={8}
+                minLength={12}
                 placeholder="Repite la nueva contraseña"
                 className="w-full pl-3.5 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
               />
@@ -198,9 +200,34 @@ export default function ChangePasswordModal({ isOpen, onClose }: ChangePasswordM
             </div>
           </div>
 
-          <div className="pt-1 text-[11px] text-slate-400 leading-tight">
-            * Se recomienda incluir mayúsculas, minúsculas, números y caracteres especiales.
-          </div>
+          {/* Indicadores dinámicos de política de seguridad */}
+          {(() => {
+            const v = validatePasswordPolicy(newPassword)
+            return (
+              <div className="bg-slate-50 dark:bg-slate-800/60 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 text-[10px] space-y-1">
+                <p className="font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+                  Requisitos obligatorios de contraseña:
+                </p>
+                <div className="grid grid-cols-2 gap-1 text-[10px]">
+                  <span className={v.hasMinLength ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+                    {v.hasMinLength ? "✓" : "○"} 12+ caracteres
+                  </span>
+                  <span className={v.hasUppercase ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+                    {v.hasUppercase ? "✓" : "○"} Mayúscula (A-Z)
+                  </span>
+                  <span className={v.hasLowercase ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+                    {v.hasLowercase ? "✓" : "○"} Minúscula (a-z)
+                  </span>
+                  <span className={v.hasNumber ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+                    {v.hasNumber ? "✓" : "○"} Número (0-9)
+                  </span>
+                  <span className={v.hasSpecialChar ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1 col-span-2" : "text-slate-400 flex items-center gap-1 col-span-2"}>
+                    {v.hasSpecialChar ? "✓" : "○"} Signo especial (!@#$%^&*...)
+                  </span>
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Acciones */}
           <div className="flex items-center gap-2 pt-2">

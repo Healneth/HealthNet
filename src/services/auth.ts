@@ -12,6 +12,7 @@ import {
 } from 'aws-amplify/auth'
 import { amplifyConfig, isCognitoConfigured, isAwsConfigured } from '../config/aws'
 import { patientsService } from './patients'
+import { validatePasswordPolicy } from '../utils/passwordValidator'
 import type { AuthUser, UserRole, SystemUser } from '../types'
 
 // ──────────────────────────────────────────────────────────
@@ -336,8 +337,9 @@ export async function login(email: string, password: string): Promise<AuthUser> 
  * Utiliza confirmSignIn de Amplify Auth v6.
  */
 export async function confirmNewPassword(newPassword: string): Promise<AuthUser> {
-  if (!newPassword || newPassword.length < 8) {
-    throw new Error('La nueva contraseña debe tener al menos 8 caracteres.')
+  const policy = validatePasswordPolicy(newPassword)
+  if (!policy.isValid) {
+    throw new Error(policy.errorMessage || 'La nueva contraseña debe contener al menos 12 caracteres, mayúsculas, minúsculas, números y caracteres especiales.')
   }
 
   if (isCognitoConfigured()) {
@@ -432,8 +434,9 @@ export async function confirmPasswordReset(
   if (!confirmationCode || !confirmationCode.trim()) {
     throw new Error('Por favor ingresa el código de verificación recibido por correo.')
   }
-  if (!newPassword || newPassword.length < 8) {
-    throw new Error('La nueva contraseña debe contener al menos 8 caracteres.')
+  const policy = validatePasswordPolicy(newPassword)
+  if (!policy.isValid) {
+    throw new Error(policy.errorMessage || 'La nueva contraseña debe contener al menos 12 caracteres, mayúsculas, minúsculas, números y caracteres especiales.')
   }
 
   if (isCognitoConfigured()) {
@@ -470,8 +473,9 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   if (!oldPassword) {
     throw new Error('Por favor ingresa tu contraseña actual.')
   }
-  if (!newPassword || newPassword.length < 8) {
-    throw new Error('La nueva contraseña debe tener al menos 8 caracteres.')
+  const policy = validatePasswordPolicy(newPassword)
+  if (!policy.isValid) {
+    throw new Error(policy.errorMessage || 'La nueva contraseña debe contener al menos 12 caracteres, mayúsculas, minúsculas, números y caracteres especiales.')
   }
 
   if (isCognitoConfigured()) {

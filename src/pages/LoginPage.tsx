@@ -17,6 +17,35 @@ import {
 import { useAuth } from '../hooks/useAuth'
 import Logo from '../components/Logo'
 import doctorPhoto from '../assets/doctor-stethoscope.jpg'
+import { validatePasswordPolicy } from '../utils/passwordValidator'
+
+function PasswordRequirementList({ password }: { password: string }) {
+  const v = validatePasswordPolicy(password)
+  return (
+    <div className="bg-slate-50 dark:bg-slate-800/60 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 text-[11px] space-y-1.5 my-1">
+      <p className="font-bold text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">
+        Requisitos obligatorios de seguridad:
+      </p>
+      <div className="grid grid-cols-2 gap-1 text-[10px]">
+        <span className={v.hasMinLength ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+          {v.hasMinLength ? "✓" : "○"} 12+ caracteres
+        </span>
+        <span className={v.hasUppercase ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+          {v.hasUppercase ? "✓" : "○"} Mayúscula (A-Z)
+        </span>
+        <span className={v.hasLowercase ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+          {v.hasLowercase ? "✓" : "○"} Minúscula (a-z)
+        </span>
+        <span className={v.hasNumber ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1" : "text-slate-400 flex items-center gap-1"}>
+          {v.hasNumber ? "✓" : "○"} Número (0-9)
+        </span>
+        <span className={v.hasSpecialChar ? "text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1 col-span-2" : "text-slate-400 flex items-center gap-1 col-span-2"}>
+          {v.hasSpecialChar ? "✓" : "○"} Signo especial (!@#$%^&*...)
+        </span>
+      </div>
+    </div>
+  )
+}
 
 type AuthMode = 'login' | 'new_password' | 'forgot_request' | 'forgot_confirm'
 
@@ -82,8 +111,9 @@ export default function LoginPage() {
     e.preventDefault()
     setError(null)
 
-    if (newPassword.length < 8) {
-      setError('La nueva contraseña debe tener un mínimo de 8 caracteres.')
+    const policy = validatePasswordPolicy(newPassword)
+    if (!policy.isValid) {
+      setError(policy.errorMessage || 'La contraseña no cumple con los requisitos de seguridad.')
       return
     }
     if (newPassword !== confirmPwd) {
@@ -147,8 +177,9 @@ export default function LoginPage() {
       setError('Ingresa el código de 6 dígitos recibido por correo.')
       return
     }
-    if (newPassword.length < 8) {
-      setError('La nueva contraseña debe tener un mínimo de 8 caracteres.')
+    const policy = validatePasswordPolicy(newPassword)
+    if (!policy.isValid) {
+      setError(policy.errorMessage || 'La contraseña no cumple con los requisitos de seguridad.')
       return
     }
     if (newPassword !== confirmPwd) {
@@ -440,8 +471,8 @@ export default function LoginPage() {
                         value={newPassword}
                         onChange={e => setNewPassword(e.target.value)}
                         required
-                        minLength={8}
-                        placeholder="Mínimo 8 caracteres"
+                        minLength={12}
+                        placeholder="Mínimo 12 caracteres"
                         className="w-full pl-3 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
                       />
                       <button
@@ -464,7 +495,7 @@ export default function LoginPage() {
                         value={confirmPwd}
                         onChange={e => setConfirmPwd(e.target.value)}
                         required
-                        minLength={8}
+                        minLength={12}
                         placeholder="Repite la contraseña"
                         className="w-full pl-3 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
                       />
@@ -478,9 +509,7 @@ export default function LoginPage() {
                     </div>
                   </div>
 
-                  <p className="text-[10px] text-slate-400">
-                    * Mínimo 8 caracteres, combinando letras, números y símbolos.
-                  </p>
+                  <PasswordRequirementList password={newPassword} />
 
                   <button
                     type="submit"
@@ -614,8 +643,8 @@ export default function LoginPage() {
                         value={newPassword}
                         onChange={e => setNewPassword(e.target.value)}
                         required
-                        minLength={8}
-                        placeholder="Mínimo 8 caracteres"
+                        minLength={12}
+                        placeholder="Mínimo 12 caracteres"
                         className="w-full pl-3 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
                       />
                       <button
@@ -638,7 +667,7 @@ export default function LoginPage() {
                         value={confirmPwd}
                         onChange={e => setConfirmPwd(e.target.value)}
                         required
-                        minLength={8}
+                        minLength={12}
                         placeholder="Repite la contraseña"
                         className="w-full pl-3 pr-10 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#637fa8]/25 focus:border-[#637fa8]"
                       />
@@ -651,6 +680,8 @@ export default function LoginPage() {
                       </button>
                     </div>
                   </div>
+
+                  <PasswordRequirementList password={newPassword} />
 
                   <button
                     type="submit"
