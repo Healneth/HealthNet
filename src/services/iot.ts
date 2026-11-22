@@ -99,9 +99,18 @@ class IotService {
       this.subscribe()
     })
 
-    this.client.on('message', (_topic: string, payload: Buffer) => {
+    this.client.on('message', (topic: string, payload: Buffer) => {
       try {
         const data: DeviceTelemetry = JSON.parse(payload.toString())
+        if (topic.endsWith('/emergency') || data.eventType === 'EMERGENCY_BUTTON') {
+          data.emergencyButtonPressed = true
+          if (!data.emergencyButton) {
+            data.emergencyButton = {
+              pressed: true,
+              eventId: data.eventId
+            }
+          }
+        }
         useDeviceStore.getState().upsertTelemetry(data)
       } catch (e) {
         console.error('[IoT] Error parseando mensaje:', e)
@@ -115,16 +124,18 @@ class IotService {
 
   private subscribe() {
     if (!this.client || this.subscribed) return
-    const topic = `${AWS_CONFIG.iot.topicPrefix}/+/telemetry`
-    this.client.subscribe(topic, (err) => {
+    const telemetryTopic = `${AWS_CONFIG.iot.topicPrefix}/+/telemetry`
+    const emergencyTopic = `${AWS_CONFIG.iot.topicPrefix}/+/emergency`
+
+    this.client.subscribe([telemetryTopic, emergencyTopic], (err: Error | null) => {
       if (!err) {
-        console.log(`[IoT] Suscrito a ${topic}`)
+        console.log(`[IoT] Suscrito a ${telemetryTopic} y ${emergencyTopic}`)
         this.subscribed = true
       }
     })
   }
 
-  /** Publica telemetría (usado por el simulador) */
+  /** Publica telemetría periódica (usado por el simulador) */
   async publish(deviceId: string, data: DeviceTelemetry): Promise<void> {
     const topic = `${AWS_CONFIG.iot.topicPrefix}/${deviceId}/telemetry`
     if (this.client?.connected) {
@@ -132,6 +143,33 @@ class IotService {
     }
     // En modo demo también actualizamos el store directamente
     useDeviceStore.getState().upsertTelemetry(data)
+  }
+
+  /** Publica evento inmediato de emergencia por pulsador PBS-33B (Regla 1: Identificación exclusiva por deviceId) */
+  async publishEmergency(deviceId: string, emergencyData: Partial<DeviceTelemetry>): Promise<void> {
+    const topic = `${AWS_CONFIG.iot.topicPrefix}/${deviceId}/emergency`
+    const eventId = emergencyData.eventId || emergencyData.emergencyButton?.eventId || `ev-${Date.now()}`
+    const fullData: DeviceTelemetry = {
+      deviceId,
+      timestamp: emergencyData.timestamp || Date.now(),
+      heartRate: emergencyData.heartRate ?? 75,
+      temperature: emergencyData.temperature ?? 36.6,
+      fallDetected: false,
+      emergencyButtonPressed: true,
+      emergencyButton: {
+        pressed: true,
+        eventId
+      },
+      eventId,
+      eventType: 'EMERGENCY_BUTTON',
+      batteryLevel: emergencyData.batteryLevel ?? 100,
+      ...emergencyData
+    }
+
+    if (this.client?.connected) {
+      this.client.publish(topic, JSON.stringify(fullData), { qos: 1 })
+    }
+    useDeviceStore.getState().upsertTelemetry(fullData)
   }
 
   disconnect() {

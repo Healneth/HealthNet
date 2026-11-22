@@ -1,6 +1,7 @@
 import { format, startOfWeek, endOfWeek, addDays, parseISO, isBefore, isAfter, isSameDay } from 'date-fns'
 import { es } from 'date-fns/locale'
-import type { ShiftType, ShiftConfig, NurseShiftAssignment } from '../types'
+import type { ShiftType, ShiftConfig, NurseShiftAssignment, AuthUser } from '../types'
+import { AWS_CONFIG, isApiConfigured } from '../config/aws'
 
 const SHIFT_CONFIGS_STORAGE_KEY = 'healthnet_facility_shifts'
 const SHIFT_ASSIGNMENTS_STORAGE_KEY = 'healthnet_nurse_shifts'
@@ -34,12 +35,14 @@ export const DEFAULT_SHIFT_CONFIGS: Record<ShiftType, ShiftConfig> = {
 // ──────────────────────────────────────────────────────────
 export function getShiftConfigs(): Record<ShiftType, ShiftConfig> {
   try {
-    const raw = localStorage.getItem(SHIFT_CONFIGS_STORAGE_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      return {
-        ...DEFAULT_SHIFT_CONFIGS,
-        ...parsed,
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(SHIFT_CONFIGS_STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        return {
+          ...DEFAULT_SHIFT_CONFIGS,
+          ...parsed,
+        }
       }
     }
   } catch (e) {
@@ -50,9 +53,68 @@ export function getShiftConfigs(): Record<ShiftType, ShiftConfig> {
 
 export function saveShiftConfigs(configs: Record<ShiftType, ShiftConfig>): void {
   try {
-    localStorage.setItem(SHIFT_CONFIGS_STORAGE_KEY, JSON.stringify(configs))
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      localStorage.setItem(SHIFT_CONFIGS_STORAGE_KEY, JSON.stringify(configs))
+    }
   } catch (e) {
     console.error('[shiftService] Error guardando configuraciones de turnos:', e)
+  }
+}
+
+/**
+ * Consulta la configuración de horarios del centro desde AWS API Gateway (/facility-shifts).
+ * Sincroniza el almacenamiento local y responde con fallback automático ante fallas de red.
+ */
+export async function fetchShiftConfigsFromApi(): Promise<Record<ShiftType, ShiftConfig>> {
+  if (isApiConfigured()) {
+    try {
+      const res = await fetch(`${AWS_CONFIG.apiEndpoint}/facility-shifts`)
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data) && data.length > 0) {
+          const mapped: Partial<Record<ShiftType, ShiftConfig>> = {}
+          data.forEach((item: any) => {
+            if (item.id && (item.id === 'matutino' || item.id === 'vespertino' || item.id === 'nocturno')) {
+              mapped[item.id as ShiftType] = {
+                id: item.id,
+                name: item.name || DEFAULT_SHIFT_CONFIGS[item.id as ShiftType].name,
+                startTime: item.startTime ? item.startTime.slice(0, 5) : DEFAULT_SHIFT_CONFIGS[item.id as ShiftType].startTime,
+                endTime: item.endTime ? item.endTime.slice(0, 5) : DEFAULT_SHIFT_CONFIGS[item.id as ShiftType].endTime,
+                description: item.description || DEFAULT_SHIFT_CONFIGS[item.id as ShiftType].description,
+              }
+            }
+          })
+          const merged = { ...DEFAULT_SHIFT_CONFIGS, ...mapped }
+          saveShiftConfigs(merged)
+          return merged
+        }
+      }
+    } catch (e) {
+      console.warn('[shiftService] AWS API /facility-shifts no accesible, usando configuración local:', e)
+    }
+  }
+  return getShiftConfigs()
+}
+
+/**
+ * Persiste la configuración de horarios en AWS API Gateway y localmente.
+ */
+export async function saveShiftConfigsToApi(configs: Record<ShiftType, ShiftConfig>, user?: AuthUser | null): Promise<void> {
+  saveShiftConfigs(configs)
+  if (isApiConfigured()) {
+    try {
+      await fetch(`${AWS_CONFIG.apiEndpoint}/facility-shifts`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Role': user?.role || 'admin',
+          'X-User-Id': user?.id || 'admin',
+        },
+        body: JSON.stringify(configs),
+      })
+    } catch (e) {
+      console.warn('[shiftService] Error sincronizando configuración de turnos con AWS API:', e)
+    }
   }
 }
 
@@ -196,20 +258,22 @@ function getInitialMockAssignments(): NurseShiftAssignment[] {
 export function getShiftAssignments(): NurseShiftAssignment[] {
   const initial = getInitialMockAssignments()
   try {
-    const raw = localStorage.getItem(SHIFT_ASSIGNMENTS_STORAGE_KEY)
-    if (raw) {
-      const parsed: NurseShiftAssignment[] = JSON.parse(raw)
-      let updated = false
-      initial.forEach(initItem => {
-        if (!parsed.some(p => p.nurseId === initItem.nurseId && p.weekStartDate === initItem.weekStartDate)) {
-          parsed.push(initItem)
-          updated = true
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(SHIFT_ASSIGNMENTS_STORAGE_KEY)
+      if (raw) {
+        const parsed: NurseShiftAssignment[] = JSON.parse(raw)
+        let updated = false
+        initial.forEach(initItem => {
+          if (!parsed.some(p => p.nurseId === initItem.nurseId && p.weekStartDate === initItem.weekStartDate)) {
+            parsed.push(initItem)
+            updated = true
+          }
+        })
+        if (updated) {
+          saveShiftAssignments(parsed)
         }
-      })
-      if (updated) {
-        saveShiftAssignments(parsed)
+        return parsed
       }
-      return parsed
     }
   } catch (e) {
     console.error('[shiftService] Error cargando asignaciones de turnos:', e)
@@ -220,7 +284,9 @@ export function getShiftAssignments(): NurseShiftAssignment[] {
 
 export function saveShiftAssignments(assignments: NurseShiftAssignment[]): void {
   try {
-    localStorage.setItem(SHIFT_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignments))
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      localStorage.setItem(SHIFT_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignments))
+    }
   } catch (e) {
     console.error('[shiftService] Error guardando asignaciones de turnos:', e)
   }
@@ -316,6 +382,99 @@ export function saveOrUpdateNurseShift(
 export function removeNurseShift(id: string): void {
   const all = getShiftAssignments().filter(a => a.id !== id)
   saveShiftAssignments(all)
+}
+
+/**
+ * Consulta las asignaciones de turnos de enfermería desde AWS API Gateway (/nurse-shifts).
+ * Permite filtrar por semana y sincroniza de forma transparente la memoria local.
+ */
+export async function fetchShiftAssignmentsFromApi(weekStartDate?: string): Promise<NurseShiftAssignment[]> {
+  if (isApiConfigured()) {
+    try {
+      const url = new URL(`${AWS_CONFIG.apiEndpoint}/nurse-shifts`)
+      if (weekStartDate) url.searchParams.set('weekStartDate', weekStartDate)
+      const res = await fetch(url.toString())
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data) && data.length > 0) {
+          const currentLocal = getShiftAssignments()
+          const merged = [...currentLocal]
+          data.forEach((remote: any) => {
+            const idx = merged.findIndex(m => m.id === remote.id || (m.nurseId === remote.nurseId && m.weekStartDate === remote.weekStartDate))
+            const formatted: NurseShiftAssignment = {
+              id: remote.id,
+              nurseId: remote.nurseId,
+              nurseName: remote.nurseName,
+              nurseEmail: remote.nurseEmail,
+              weekStartDate: remote.weekStartDate,
+              shiftType: remote.shiftType,
+              days: remote.days || ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'],
+              notes: remote.notes || '',
+              assignedByUserName: remote.assignedByUserName || 'Administración',
+              createdAt: remote.createdAt || new Date().toISOString(),
+              updatedAt: remote.updatedAt,
+            }
+            if (idx >= 0) {
+              merged[idx] = formatted
+            } else {
+              merged.push(formatted)
+            }
+          })
+          saveShiftAssignments(merged)
+          return merged
+        }
+      }
+    } catch (e) {
+      console.warn('[shiftService] AWS API /nurse-shifts no disponible, usando asignaciones locales:', e)
+    }
+  }
+  return getShiftAssignments()
+}
+
+/**
+ * Registra o actualiza una asignación de turno en AWS API Gateway y en local.
+ */
+export async function saveOrUpdateNurseShiftApi(
+  assignmentData: Omit<NurseShiftAssignment, 'id' | 'createdAt'> & { id?: string },
+  user?: AuthUser | null
+): Promise<NurseShiftAssignment> {
+  const localSaved = saveOrUpdateNurseShift(assignmentData)
+  if (isApiConfigured()) {
+    try {
+      await fetch(`${AWS_CONFIG.apiEndpoint}/nurse-shifts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Role': user?.role || 'admin',
+          'X-User-Id': user?.id || 'admin',
+        },
+        body: JSON.stringify(localSaved),
+      })
+    } catch (e) {
+      console.warn('[shiftService] Error sincronizando asignación de turno con AWS API:', e)
+    }
+  }
+  return localSaved
+}
+
+/**
+ * Elimina una asignación de turno en local y en AWS API Gateway.
+ */
+export async function removeNurseShiftApi(id: string, user?: AuthUser | null): Promise<void> {
+  removeNurseShift(id)
+  if (isApiConfigured()) {
+    try {
+      await fetch(`${AWS_CONFIG.apiEndpoint}/nurse-shifts/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'X-User-Role': user?.role || 'admin',
+          'X-User-Id': user?.id || 'admin',
+        },
+      })
+    } catch (e) {
+      console.warn('[shiftService] Error eliminando turno en AWS API:', e)
+    }
+  }
 }
 
 /**

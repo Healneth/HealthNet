@@ -12,9 +12,74 @@ try {
   console.warn('AWS SDK CognitoIdentityProviderClient no disponible localmente:', e.message);
 }
 
+let SESClient = null;
+let SendEmailCommand = null;
+try {
+  const sesPkg = require('@aws-sdk/client-ses');
+  SESClient = sesPkg.SESClient;
+  SendEmailCommand = sesPkg.SendEmailCommand;
+} catch (e) {
+  console.warn('AWS SDK SESClient no disponible localmente:', e.message);
+}
+
+let SNSClient = null;
+let PublishCommand = null;
+try {
+  const snsPkg = require('@aws-sdk/client-sns');
+  SNSClient = snsPkg.SNSClient;
+  PublishCommand = snsPkg.PublishCommand;
+} catch (e) {
+  console.warn('AWS SDK SNSClient no disponible localmente:', e.message);
+}
+
 function getCognitoClient() {
   if (!CognitoClient) return null;
   return new CognitoClient({ region: process.env.AWS_REGION || 'us-west-1' });
+}
+
+function getSESClient() {
+  if (!SESClient) return null;
+  return new SESClient({ region: process.env.AWS_REGION || 'us-west-1' });
+}
+
+function getSNSClient() {
+  if (!SNSClient) return null;
+  return new SNSClient({ region: process.env.AWS_REGION || 'us-west-1' });
+}
+
+/**
+ * Despachador unificado de alertas críticas vía AWS End User Messaging / Amazon SNS (SMS).
+ * Valida y formatea el número al estándar internacional E.164 antes de emitir la petición.
+ */
+async function dispatchAwsMessagingSms(phone, message) {
+  if (!phone) return { sent: false, reason: 'Teléfono no proporcionado' };
+  let cleaned = phone.trim().replace(/[\s\-\(\)\.]/g, '');
+  if (!cleaned.startsWith('+')) {
+    if (cleaned.length === 10) cleaned = '+52' + cleaned;
+    else cleaned = '+' + cleaned;
+  }
+  if (!/^\+[1-9]\d{7,14}$/.test(cleaned)) {
+    console.warn('[AWS Messaging SMS] Teléfono no cumple con formato E.164:', phone);
+    return { sent: false, reason: 'Formato no cumple estándar E.164' };
+  }
+
+  const sns = getSNSClient();
+  if (sns && PublishCommand && process.env.SNS_ENABLED === 'true') {
+    try {
+      await sns.send(new PublishCommand({
+        PhoneNumber: cleaned,
+        Message: message,
+      }));
+      console.log(`[AWS Messaging SMS] Notificación enviada con éxito a ${cleaned}`);
+      return { sent: true, phone: cleaned };
+    } catch (err) {
+      console.error(`[AWS Messaging SMS] Error enviando a ${cleaned}:`, err.message);
+      return { sent: false, error: err.message };
+    }
+  } else {
+    console.log(`[AWS Messaging SMS Simulado] (SNS_ENABLED no activo o en local) Para: ${cleaned} | Msg: ${message}`);
+    return { sent: true, simulated: true, phone: cleaned };
+  }
 }
 
 const clientConfig = {
@@ -59,6 +124,305 @@ const headers = {
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
 };
 
+/**
+ * ─────────────────────────────────────────────────────────────
+ * PROCESAMIENTO CENTRALIZADO DE EVENTOS DEL BOTÓN PBS-33B
+ * Cumple estrictamente con las 7 reglas asistenciales:
+ * 1. Identificación exclusiva por deviceId (cero confianza en datos del payload).
+ * 2. Asignación exclusiva a enfermeros relacionados con el paciente en el turno activo.
+ * 3. Deduplicación por eventId en BD (idempotencia) sin enfriamiento en el ESP32.
+ * 4. Inmutabilidad y trazabilidad completa (alerts, tickets, bitácora de actividad).
+ * 5. Notificaciones multicanal (SES / SNS) con identificación de estado.
+ * ─────────────────────────────────────────────────────────────
+ */
+async function processEmergencyEvent(db, { deviceId, eventId, timestamp }) {
+  if (!deviceId) {
+    const err = new Error('Identificador del dispositivo/brazalete (deviceId) no proporcionado.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const cleanDeviceId = deviceId.trim();
+  const cleanEventId = eventId || `ev-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+  // 1. DEDUPLICACIÓN ESTRICTA EN BASE DE DATOS
+  const existingAlert = await db.query('SELECT * FROM alerts WHERE event_id = $1 LIMIT 1', [cleanEventId]);
+  if (existingAlert.rows.length > 0) {
+    const existingTicket = await db.query('SELECT * FROM tickets WHERE event_id = $1 LIMIT 1', [cleanEventId]);
+    return {
+      isDuplicate: true,
+      alert: existingAlert.rows[0],
+      ticket: existingTicket.rows[0] || null,
+      message: 'Evento de emergencia ya registrado previamente (idempotencia confirmada).'
+    };
+  }
+
+  // 2. VALIDACIÓN DEL BRAZALETE Y OBTENCIÓN EXCLUSIVA DE DATOS DEL PACIENTE DESDE BD
+  // Cero confianza en paciente o habitación enviados por el dispositivo o cliente
+  const braceRes = await db.query(`
+    SELECT 
+      b.device_id,
+      b.patient_id,
+      b.status AS bracelet_status,
+      p.id AS patient_uuid,
+      p.full_name AS patient_name,
+      p.room_number,
+      p.floor,
+      p.bed_number,
+      p.is_active AS patient_is_active,
+      COALESCE(p.is_archived, false) AS patient_is_archived
+    FROM bracelets b
+    LEFT JOIN patients p ON b.patient_id = p.id
+    WHERE b.device_id = $1
+    LIMIT 1;
+  `, [cleanDeviceId]);
+
+  if (braceRes.rows.length === 0) {
+    console.error(`[EMERGENCIA RECHAZADA] El dispositivo ${cleanDeviceId} no está registrado en la base de datos.`);
+    const err = new Error(`Dispositivo o brazalete '${cleanDeviceId}' no registrado en el sistema HealthNet. Evento de emergencia rechazado.`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const braceData = braceRes.rows[0];
+  if (!braceData.patient_id || !braceData.patient_name || braceData.patient_is_active === false || braceData.patient_is_archived === true) {
+    console.error(`[EMERGENCIA IGNORADA] El brazalete ${cleanDeviceId} no tiene un paciente activo vinculado.`);
+    const err = new Error(`El brazalete '${cleanDeviceId}' no tiene ningún paciente activo asociado en el sistema. Evento de emergencia ignorado.`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const patientUuid = braceData.patient_uuid;
+  const patientName = braceData.patient_name;
+  const roomNumber = braceData.room_number || 'Habitación no asignada';
+  const floor = braceData.floor || 'Piso 1';
+
+  // 3. DETERMINACIÓN DEL TURNO ACTUAL
+  const eventDate = timestamp ? new Date(typeof timestamp === 'number' ? timestamp : Number(timestamp)) : new Date();
+  const currentHour = isNaN(eventDate.getHours()) ? new Date().getHours() : eventDate.getHours();
+  let currentShift = 'matutino';
+  if (currentHour >= 7 && currentHour < 15) currentShift = 'matutino';
+  else if (currentHour >= 15 && currentHour < 23) currentShift = 'vespertino';
+  else currentShift = 'nocturno';
+
+  // 4. ASIGNACIÓN EXCLUSIVA A ENFERMEROS RELACIONADOS CON EL PACIENTE Y EN EL TURNO
+  // Regla 2: Solo enfermeros registrados y activos relacionados con el paciente para ese turno.
+  // NO doctores, NO administradores. Si no existe ninguno disponible, queda sin asignar.
+  let assignedNurseId = null;
+  let assignedNurseName = null;
+  let assignedNurseEmail = null;
+  let assignedNursePhone = null;
+  let isUnassigned = true;
+
+  try {
+    const psaRes = await db.query(`
+      SELECT 
+        psa.nurse_id,
+        u.full_name,
+        u.email,
+        u.phone_number,
+        u.role_id,
+        u.is_active
+      FROM patient_shift_assignments psa
+      JOIN users u ON u.id = psa.nurse_id
+      WHERE (psa.patient_id = $1 OR psa.patient_uuid = $1 OR psa.patient_device_id = $2)
+        AND psa.shift_type = $3
+        AND psa.active = true
+        AND u.role_id = 'nurse'
+        AND u.is_active = true
+      LIMIT 1;
+    `, [patientUuid, cleanDeviceId, currentShift]);
+
+    if (psaRes.rows.length > 0) {
+      const nurse = psaRes.rows[0];
+      assignedNurseId = nurse.nurse_id;
+      assignedNurseName = nurse.full_name;
+      assignedNurseEmail = nurse.email;
+      assignedNursePhone = nurse.phone_number;
+      isUnassigned = false;
+    }
+  } catch (errPsa) {
+    console.warn('[processEmergencyEvent] Error consultando patient_shift_assignments:', errPsa.message);
+  }
+
+  // 5. GENERACIÓN DE FOLIO Y METADATOS
+  const currentYear = new Date().getFullYear();
+  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+  const folio = `TCK-${currentYear}-${randomSuffix}`;
+  const alertTitle = 'Emergencia Solicitada por Paciente (Pulsador PBS-33B)';
+  const alertMsg = `¡Emergencia solicitada por paciente mediante pulsador PBS-33B (${patientName} - ${roomNumber})!`;
+
+  // 6. INSERCIÓN EN TABLA ALERTS
+  const insAlert = await db.query(`
+    INSERT INTO alerts (
+      folio, event_id, origin, patient_id, device_id, type, title, criticality, clinical_value, shift_type, message, current_status, acknowledged, assigned_nurse_id
+    ) VALUES (
+      $1, $2, 'EMERGENCY_BUTTON', $3, $4, 'emergency_button', $5, 'CRITICA', 'Pulsador PBS-33B', $6, $7, 'PENDIENTE', false, $8
+    )
+    ON CONFLICT (id) DO NOTHING
+    RETURNING *;
+  `, [folio, cleanEventId, patientUuid, cleanDeviceId, alertTitle, currentShift, alertMsg, assignedNurseId]);
+
+  const alertRecord = insAlert.rows[0] || null;
+
+  // 7. INSERCIÓN EN TABLA TICKETS
+  const insTicket = await db.query(`
+    INSERT INTO tickets (
+      folio, alert_id, origin, event_id, patient_id, patient_uuid, patient_name, room_number, floor, device_id, alert_type, title, description, clinical_value, criticality, shift_type, status, assigned_nurse_id, assigned_nurse_name, is_unassigned
+    ) VALUES (
+      $1, $2, 'EMERGENCY_BUTTON', $3, $4, $4, $5, $6, $7, $8, 'emergency_button', $9, $10, 'Pulsador PBS-33B Activado', 'critica', $11, 'recibido', $12, $13, $14
+    )
+    ON CONFLICT (folio) DO NOTHING
+    RETURNING *;
+  `, [
+    folio,
+    alertRecord ? alertRecord.id : folio,
+    cleanEventId,
+    patientUuid,
+    patientName,
+    roomNumber,
+    floor,
+    cleanDeviceId,
+    alertTitle,
+    'El paciente ha presionado el pulsador de auxilio PBS-33B solicitando asistencia médica inmediata.',
+    currentShift,
+    assignedNurseId,
+    assignedNurseName,
+    isUnassigned
+  ]);
+
+  const ticketRecord = insTicket.rows[0] || null;
+  const ticketId = ticketRecord ? ticketRecord.id : folio;
+
+  // 8. BITÁCORA DE ACTIVIDAD FORMAL
+  const activityNote = isUnassigned
+    ? `🚨 ALERTA CRÍTICA SIN ASIGNAR: El paciente ${patientName} (${roomNumber}) activó el pulsador PBS-33B pero no cuenta con un enfermero asignado para el turno ${currentShift}. Requiere atención prioritaria por parte de supervisión o administración.`
+    : `Alerta de emergencia recibida por pulsador físico PBS-33B. Asignado a enfermero responsable ${assignedNurseName} para el turno ${currentShift}.`;
+
+  try {
+    await db.query(`
+      INSERT INTO ticket_activity (ticket_id, action, description, user_id, user_name, user_role)
+      VALUES ($1, 'RECEPCION', $2, 'SISTEMA', 'Sistema HealthNet (AWS IoT)', 'sistema');
+    `, [ticketId, activityNote]);
+  } catch (actErr) {
+    console.warn('[processEmergencyEvent] Error registrando bitácora de actividad:', actErr.message);
+  }
+
+  // 9. AUDITORÍA DEL SISTEMA
+  try {
+    await db.query(`
+      INSERT INTO audit_log (user_id, user_email, user_role, action, entity_type, entity_id, details)
+      VALUES ('SISTEMA', 'iot@healthnet.com', 'sistema', 'EMERGENCY_BUTTON_TRIGGERED', 'emergency_alert', $1, $2);
+    `, [cleanEventId, `Emergencia PBS-33B para paciente ${patientName} (${cleanDeviceId}). ${isUnassigned ? 'SIN ENFERMERO ASIGNADO' : 'Asignado a: ' + assignedNurseName}`]);
+  } catch (audErr) {
+    console.warn('[processEmergencyEvent] Error registrando auditoría:', audErr.message);
+  }
+
+  // 10. NOTIFICACIONES (AWS SES Y SNS)
+  const notificationStatus = {
+    emailSent: false,
+    smsSent: false,
+    adminNotified: false,
+    notes: []
+  };
+
+  const sesClient = getSESClient();
+  const snsClient = getSNSClient();
+
+  // Envío a enfermero asignado
+  if (assignedNurseEmail && sesClient && SendEmailCommand && process.env.SES_SENDER_EMAIL) {
+    try {
+      await sesClient.send(new SendEmailCommand({
+        Source: process.env.SES_SENDER_EMAIL,
+        Destination: { ToAddresses: [assignedNurseEmail] },
+        Message: {
+          Subject: { Data: `🚨 URGENTE: Emergencia PBS-33B de Paciente ${patientName} (${roomNumber})` },
+          Body: {
+            Text: {
+              Data: `ALERTA CRÍTICA HEALTHNET\n\nEl paciente ${patientName} en ${roomNumber} (${floor}) ha presionado el pulsador de auxilio PBS-33B.\n\nFolio: ${folio}\nTurno: ${currentShift}\nAsignado a: ${assignedNurseName}\n\nFavor de acudir de inmediato a brindar asistencia.`
+            }
+          }
+        }
+      }));
+      notificationStatus.emailSent = true;
+    } catch (sesErr) {
+      notificationStatus.notes.push(`Error SES: ${sesErr.message}`);
+    }
+  } else {
+    notificationStatus.notes.push('SES email pendiente de configuración (falta SES_SENDER_EMAIL o cliente).');
+  }
+
+  if (assignedNursePhone) {
+    const smsMsg = `[HealthNet] 🚨 EMERGENCIA PBS-33B: Paciente ${patientName} (${roomNumber}) solicita auxilio inmediato. Folio: ${folio}`;
+    const smsRes = await dispatchAwsMessagingSms(assignedNursePhone, smsMsg);
+    if (smsRes.sent) {
+      notificationStatus.smsSent = true;
+    } else {
+      notificationStatus.notes.push(`Aviso SMS: ${smsRes.reason || smsRes.error}`);
+    }
+  } else {
+    notificationStatus.notes.push('Sin teléfono móvil de enfermero asignado para SMS de emergencia.');
+  }
+
+  // Si quedó sin asignar, notificar a los administradores vía Email y SMS
+  if (isUnassigned) {
+    try {
+      const adminUsers = await db.query("SELECT email, phone_number FROM users WHERE role_id = 'admin' AND is_active = true");
+      if (adminUsers.rows.length > 0) {
+        if (sesClient && SendEmailCommand && process.env.SES_SENDER_EMAIL) {
+          const adminEmails = adminUsers.rows.map(r => r.email).filter(Boolean);
+          if (adminEmails.length > 0) {
+            await sesClient.send(new SendEmailCommand({
+              Source: process.env.SES_SENDER_EMAIL,
+              Destination: { ToAddresses: adminEmails },
+              Message: {
+                Subject: { Data: `⚠️ ALERTA CRÍTICA SIN ASIGNAR: Paciente ${patientName} (${roomNumber})` },
+                Body: {
+                  Text: {
+                    Data: `ATENCIÓN ADMINISTRATIVA:\n\nEl paciente ${patientName} en ${roomNumber} ha activado el pulsador PBS-33B pero NO tiene enfermero asignado en el turno actual (${currentShift}).\n\nFolio: ${folio}\nSe requiere asignación inmediata de personal de enfermería.`
+                  }
+                }
+              }
+            }));
+            notificationStatus.adminNotified = true;
+          }
+        }
+
+        // SMS a administradores de guardia ante emergencia sin asignar
+        for (const admin of adminUsers.rows) {
+          if (admin.phone_number) {
+            const adminSms = `[HealthNet] ⚠️ ALERTA CRÍTICA SIN ASIGNAR: Paciente ${patientName} (${roomNumber}) activó pulsador PBS-33B sin enfermero en turno ${currentShift}. Folio: ${folio}`;
+            await dispatchAwsMessagingSms(admin.phone_number, adminSms);
+          }
+        }
+      }
+    } catch (adminNotifErr) {
+      console.warn('[processEmergencyEvent] Error notificando administradores:', adminNotifErr.message);
+    }
+  }
+
+  return {
+    success: true,
+    folio,
+    eventId: cleanEventId,
+    patientId: patientUuid,
+    patientName,
+    roomNumber,
+    floor,
+    deviceId: cleanDeviceId,
+    shiftType: currentShift,
+    assignedNurseId,
+    assignedNurseName,
+    isUnassigned,
+    alert: alertRecord,
+    ticket: ticketRecord,
+    notifications: notificationStatus,
+    message: isUnassigned
+      ? `Alerta de emergencia generada con éxito (Folio: ${folio}). Paciente sin enfermero asignado en turno ${currentShift}; se emitió aviso prioritario a administración.`
+      : `Alerta de emergencia generada con éxito (Folio: ${folio}) y asignada al enfermero ${assignedNurseName} (${currentShift}).`
+  };
+}
+
 exports.handler = async (event) => {
   console.log('HTTP Event received:', JSON.stringify(event, null, 2));
 
@@ -73,6 +437,31 @@ exports.handler = async (event) => {
 
   try {
     const db = await getDbClient();
+
+    // ─────────────────────────────────────────────────────────
+    // 0. INGESTIÓN DIRECTA DE EVENTO AWS IOT CORE (MQTT)
+    // ─────────────────────────────────────────────────────────
+    if (!event.httpMethod && (event.eventType === 'EMERGENCY_BUTTON' || event.emergencyButtonPressed || event.emergencyButton)) {
+      try {
+        const devId = event.deviceId;
+        const evId = event.eventId || event.emergencyButton?.eventId;
+        const result = await processEmergencyEvent(db, {
+          deviceId: devId,
+          eventId: evId,
+          timestamp: event.timestamp
+        });
+        return {
+          statusCode: result.isDuplicate ? 200 : 201,
+          body: JSON.stringify(result)
+        };
+      } catch (err) {
+        console.error('[IoT Core] Error procesando evento de emergencia:', err.message);
+        return {
+          statusCode: err.statusCode || 500,
+          body: JSON.stringify({ error: err.message })
+        };
+      }
+    }
     
     // Determine the route and caller identity
     const httpMethod = event.httpMethod;
@@ -686,10 +1075,52 @@ exports.handler = async (event) => {
       };
     }
 
-    // POST /alerts
+    // POST /alerts/emergency y POST /alerts (con origin o type emergency_button)
+    if (httpMethod === 'POST' && (path === '/alerts/emergency' || (path === '/alerts' && (JSON.parse(event.body || '{}').type === 'emergency_button' || JSON.parse(event.body || '{}').origin === 'EMERGENCY_BUTTON')))) {
+      try {
+        const body = JSON.parse(event.body || '{}');
+        const result = await processEmergencyEvent(db, {
+          deviceId: body.deviceId,
+          eventId: body.eventId || body.event_id,
+          timestamp: body.timestamp
+        });
+        return {
+          statusCode: result.isDuplicate ? 200 : 201,
+          headers,
+          body: JSON.stringify(result)
+        };
+      } catch (err) {
+        console.error('[POST /alerts/emergency] Error procesando evento:', err.message);
+        return {
+          statusCode: err.statusCode || 500,
+          headers,
+          body: JSON.stringify({ message: err.message || 'Error procesando alerta de emergencia' })
+        };
+      }
+    }
+
+    // POST /alerts (Alertas de sensores clínicos: pulso, temperatura, caídas)
     if (httpMethod === 'POST' && path === '/alerts') {
       const body = JSON.parse(event.body || '{}');
+      const origin = body.origin || 'SENSOR';
       const criticality = (body.criticality || (body.type === 'fall' ? 'CRITICA' : 'MEDIA')).toUpperCase();
+      const eventId = body.eventId || body.event_id || null;
+
+      // Deduplicación por eventId
+      if (eventId) {
+        try {
+          const existingAlert = await db.query('SELECT * FROM alerts WHERE event_id = $1 LIMIT 1', [eventId]);
+          if (existingAlert.rows.length > 0) {
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify(existingAlert.rows[0])
+            };
+          }
+        } catch (chkErr) {
+          console.warn('Verificación de duplicados omitida:', chkErr.message);
+        }
+      }
 
       // Resolver patient_id UUID a partir del deviceId si no viene proporcionado
       let resolvedPatientId = body.patientId;
@@ -712,23 +1143,62 @@ exports.handler = async (event) => {
 
       const query = `
         INSERT INTO alerts (
-          ${alertUuid ? 'id, ' : ''}folio, patient_id, device_id, type, title, criticality, clinical_value, shift_type, message, current_status, acknowledged, assigned_nurse_id
+          ${alertUuid ? 'id, ' : ''}folio, event_id, origin, patient_id, device_id, type, title, criticality, clinical_value, shift_type, message, current_status, acknowledged, assigned_nurse_id
         )
         VALUES (
-          ${alertUuid ? '$1, ' : ''}${alertUuid ? '$2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13' : '$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12'}
+          ${alertUuid ? '$1, ' : ''}${alertUuid ? '$2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15' : '$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14'}
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING *;
       `;
       const values = alertUuid
-        ? [alertUuid, folio, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null]
-        : [folio, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null];
+        ? [alertUuid, folio, eventId, origin, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null]
+        : [folio, eventId, origin, resolvedPatientId, body.deviceId, body.type, body.title || body.type, criticality, body.clinicalValue || null, body.shiftType || null, body.message, body.currentStatus || 'PENDIENTE', body.acknowledged || false, body.nurseId || body.assigned_nurse_id || null];
 
       const result = await db.query(query, values);
+      const savedAlert = result.rows[0] || body;
+
+      // Envío de alerta crítica por AWS Messaging (SMS)
+      if (criticality === 'CRITICA' || body.type === 'fall') {
+        try {
+          let recipientPhone = null;
+          let patientName = body.patientName || 'Paciente';
+          let room = body.roomNumber || 'Habitación';
+
+          if (body.nurseId || body.assigned_nurse_id) {
+            const nurseUser = await db.query('SELECT phone_number, full_name FROM users WHERE id = $1', [body.nurseId || body.assigned_nurse_id]);
+            if (nurseUser.rows.length > 0 && nurseUser.rows[0].phone_number) {
+              recipientPhone = nurseUser.rows[0].phone_number;
+            }
+          }
+
+          if (!recipientPhone && resolvedPatientId) {
+            const patData = await db.query(`
+              SELECT p.full_name, p.room_number, u.phone_number AS nurse_phone, p.emergency_contact_phone
+              FROM patients p
+              LEFT JOIN users u ON p.assigned_nurse_id = u.id
+              WHERE p.id = $1
+            `, [resolvedPatientId]);
+            if (patData.rows.length > 0) {
+              patientName = patData.rows[0].full_name || patientName;
+              room = patData.rows[0].room_number || room;
+              recipientPhone = patData.rows[0].nurse_phone || patData.rows[0].emergency_contact_phone;
+            }
+          }
+
+          if (recipientPhone) {
+            const smsText = `[HealthNet] 🚨 ALERTA CRÍTICA: ${patientName} (${room}) - ${body.title || body.type}. Folio: ${folio}. Asistencia requerida de inmediato.`;
+            await dispatchAwsMessagingSms(recipientPhone, smsText);
+          }
+        } catch (smsErr) {
+          console.warn('[POST /alerts] Error despachando SMS crítico:', smsErr.message);
+        }
+      }
+
       return {
         statusCode: 201,
         headers,
-        body: JSON.stringify(result.rows[0] || body)
+        body: JSON.stringify(savedAlert)
       };
     }
 
@@ -1055,6 +1525,54 @@ exports.handler = async (event) => {
         };
       }
 
+      // Regla 2: Restricción asistencial estricta para tickets originados por el botón de emergencia PBS-33B
+      try {
+        const ticketCheck = await db.query('SELECT * FROM tickets WHERE id = $1', [ticketId]);
+        if (ticketCheck.rows.length > 0) {
+          const t = ticketCheck.rows[0];
+          if (t.origin === 'EMERGENCY_BUTTON' || t.alert_type === 'emergency_button') {
+            // 1. Validar que toNurseId sea un enfermero activo (NO doctor, NO admin)
+            const nurseUserCheck = await db.query(
+              'SELECT id, full_name, role_id, is_active FROM users WHERE id = $1',
+              [toNurseId]
+            );
+            if (nurseUserCheck.rows.length === 0 || nurseUserCheck.rows[0].role_id !== 'nurse' || !nurseUserCheck.rows[0].is_active) {
+              return {
+                statusCode: 400,
+                headers,
+                body: JSON.stringify({
+                  message: 'Restricción de Asignación: Las alertas generadas por el pulsador de emergencia PBS-33B únicamente pueden asignarse a enfermeros activos. No se permiten doctores ni administradores como responsables.'
+                })
+              };
+            }
+
+            // 2. Comprobar que el enfermero tenga asignación asistencial activa con el paciente para el turno destino
+            const patTargetId = t.patient_uuid || t.patient_id;
+            const devTargetId = t.device_id;
+            const psaCheck = await db.query(`
+              SELECT * FROM patient_shift_assignments
+              WHERE (patient_id = $1 OR patient_uuid = $1 OR patient_device_id = $2)
+                AND shift_type = $3
+                AND nurse_id = $4
+                AND active = true
+              LIMIT 1;
+            `, [patTargetId, devTargetId, toShiftType, toNurseId]);
+
+            if (psaCheck.rows.length === 0) {
+              return {
+                statusCode: 400,
+                headers,
+                body: JSON.stringify({
+                  message: `Asignación no autorizada: El enfermero '${toNurseName}' no tiene asignación asistencial activa con este paciente para el turno ${toShiftType}. Las alertas de emergencia solo pueden transferirse a enfermeros formalmente asignados al paciente en dicho turno.`
+                })
+              };
+            }
+          }
+        }
+      } catch (transValErr) {
+        console.warn('Validación de transferencia asistencial omitida o fallida:', transValErr.message);
+      }
+
       // Registrar transferencia formal
       const transResult = await db.query(`
         INSERT INTO ticket_transfers (ticket_id, from_nurse_id, from_nurse_name, to_nurse_id, to_nurse_name, to_shift_type, reason)
@@ -1098,6 +1616,69 @@ exports.handler = async (event) => {
         headers,
         body: JSON.stringify(transResult.rows[0])
       };
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 2.C. PROTECCIÓN DE ALERTAS Y TICKETS CONTRA ELIMINACIÓN
+    // Regla 4: Las alertas y tickets generados por el botón físico
+    // PBS-33B son críticos, inmutables y no deben poder eliminarse.
+    // ─────────────────────────────────────────────────────────
+    if (httpMethod === 'DELETE' && path.match(/^\/alerts\/[^\/]+$/)) {
+      const targetAlertId = path.split('/')[2];
+      try {
+        const alRes = await db.query('SELECT * FROM alerts WHERE id = $1', [targetAlertId]);
+        if (alRes.rows.length > 0) {
+          const al = alRes.rows[0];
+          if (al.origin === 'EMERGENCY_BUTTON' || al.type === 'emergency_button') {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: 'Protección Clínica (Regla 4): Las alertas originadas por el botón de emergencia PBS-33B son críticas e inmutables y no pueden eliminarse por normativa de auditoría y seguridad.' })
+            };
+          }
+        }
+        await db.query("DELETE FROM alerts WHERE id = $1 AND origin != 'EMERGENCY_BUTTON' AND type != 'emergency_button'", [targetAlertId]);
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ message: 'Alerta eliminada correctamente.' })
+        };
+      } catch (errDelAl) {
+        return {
+          statusCode: 500,
+          headers,
+          body: JSON.stringify({ message: errDelAl.message })
+        };
+      }
+    }
+
+    if (httpMethod === 'DELETE' && path.match(/^\/tickets\/[^\/]+$/)) {
+      const targetTicketId = path.split('/')[2];
+      try {
+        const tkRes = await db.query('SELECT * FROM tickets WHERE id = $1', [targetTicketId]);
+        if (tkRes.rows.length > 0) {
+          const tk = tkRes.rows[0];
+          if (tk.origin === 'EMERGENCY_BUTTON' || tk.alert_type === 'emergency_button') {
+            return {
+              statusCode: 403,
+              headers,
+              body: JSON.stringify({ message: 'Protección Clínica (Regla 4): Los tickets originados por el botón de emergencia PBS-33B no pueden eliminarse por normativa asistencial.' })
+            };
+          }
+        }
+        await db.query("DELETE FROM tickets WHERE id = $1 AND origin != 'EMERGENCY_BUTTON' AND alert_type != 'emergency_button'", [targetTicketId]);
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ message: 'Ticket eliminado correctamente.' })
+        };
+      } catch (errDelTk) {
+        return {
+          statusCode: 500,
+          headers,
+          body: JSON.stringify({ message: errDelTk.message })
+        };
+      }
     }
 
     // ─────────────────────────────────────────────────────────
@@ -1716,6 +2297,167 @@ exports.handler = async (event) => {
         statusCode: 200,
         headers,
         body: JSON.stringify({ success: true, assignment: result.rows[0] })
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 7. CLINICAL MEASUREMENTS ENDPOINT (Telemetría Histórica de Pacientes en RDS)
+    // ─────────────────────────────────────────────────────────
+    if (httpMethod === 'GET' && path === '/measurements') {
+      const queryParams = event.queryStringParameters || {};
+      const deviceId = queryParams.deviceId;
+      const patientId = queryParams.patientId;
+      const range = queryParams.range || 'hoy';
+
+      let intervalCondition = "cm.recorded_at >= NOW() - INTERVAL '24 hours'";
+      if (range === 'semana') {
+        intervalCondition = "cm.recorded_at >= NOW() - INTERVAL '7 days'";
+      } else if (range === 'mes') {
+        intervalCondition = "cm.recorded_at >= NOW() - INTERVAL '30 days'";
+      }
+
+      let query = `
+        SELECT 
+          cm.id,
+          cm.patient_id AS "patientId",
+          cm.heart_rate AS "heartRate",
+          cm.temperature,
+          cm.spo2,
+          cm.systolic_pressure AS "systolicPressure",
+          cm.diastolic_pressure AS "diastolicPressure",
+          cm.recorded_at AS "recordedAt",
+          TO_CHAR(cm.recorded_at, 'HH24:MI') AS "time"
+        FROM clinical_measurements cm
+        JOIN patients p ON cm.patient_id = p.id
+        WHERE ${intervalCondition}
+      `;
+      const values = [];
+
+      if (deviceId) {
+        values.push(deviceId);
+        query += ` AND p.device_id = $${values.length}`;
+      } else if (patientId) {
+        values.push(patientId);
+        query += ` AND cm.patient_id = $${values.length}`;
+      }
+
+      query += ` ORDER BY cm.recorded_at ASC LIMIT 100`;
+
+      try {
+        const result = await db.query(query, values);
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify(result.rows)
+        };
+      } catch (errM) {
+        console.warn('Error consultando clinical_measurements:', errM.message);
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify([])
+        };
+      }
+    }
+
+    if (httpMethod === 'POST' && path === '/measurements') {
+      const body = JSON.parse(event.body || '{}');
+      if (!body.deviceId && !body.patientId) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ message: 'Se requiere deviceId o patientId para registrar la medición.' })
+        };
+      }
+
+      let resolvedPatientId = body.patientId;
+      if (!resolvedPatientId && body.deviceId) {
+        const pRes = await db.query('SELECT id FROM patients WHERE device_id = $1 LIMIT 1', [body.deviceId]);
+        if (pRes.rows.length > 0) {
+          resolvedPatientId = pRes.rows[0].id;
+        }
+      }
+
+      if (!resolvedPatientId) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({ message: 'Paciente no encontrado para registrar medición.' })
+        };
+      }
+
+      const query = `
+        INSERT INTO clinical_measurements (
+          patient_id, heart_rate, temperature, spo2, systolic_pressure, diastolic_pressure, recorded_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7
+        ) RETURNING *
+      `;
+      const values = [
+        resolvedPatientId,
+        body.heartRate || null,
+        body.temperature || null,
+        body.spo2 || null,
+        body.systolicPressure || null,
+        body.diastolicPressure || null,
+        body.timestamp ? new Date(body.timestamp) : new Date()
+      ];
+
+      const result = await db.query(query, values);
+      return {
+        statusCode: 201,
+        headers,
+        body: JSON.stringify(result.rows[0])
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 8. DASHBOARD METRICS ENDPOINT (Control de Acceso Estricto por Rol)
+    // ─────────────────────────────────────────────────────────
+    if (httpMethod === 'GET' && path === '/dashboard/metrics') {
+      const queryParams = event.queryStringParameters || {};
+      const requestedScope = (queryParams.scope || (callerRole === 'admin' ? 'admin' : 'clinical')).toLowerCase();
+
+      // Validación estricta de permisos según rol
+      if (requestedScope === 'admin') {
+        if (callerRole !== 'admin') {
+          return {
+            statusCode: 403,
+            headers,
+            body: JSON.stringify({
+              error: 'Forbidden',
+              message: 'Acceso Denegado (RBAC): El dashboard administrativo y sus KPIs estratégicos están restringidos exclusivamente al rol Administrador.'
+            })
+          };
+        }
+      } else if (requestedScope === 'clinical') {
+        if (callerRole !== 'doctor' && callerRole !== 'nurse') {
+          return {
+            statusCode: 403,
+            headers,
+            body: JSON.stringify({
+              error: 'Forbidden',
+              message: 'Acceso Denegado (RBAC): El dashboard clínico-operativo está restringido exclusivamente a Doctores y Enfermeros.'
+            })
+          };
+        }
+      } else {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({ error: 'Bad Request', message: 'Ámbito de métricas no válido. Debe ser "admin" o "clinical".' })
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          scope: requestedScope,
+          authorizedRole: callerRole,
+          timestamp: new Date().toISOString(),
+          status: 'authorized'
+        })
       };
     }
 

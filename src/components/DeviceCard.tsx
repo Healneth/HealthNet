@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Heart, Thermometer, AlertTriangle, Battery, ChevronDown, ChevronUp, Wifi, FileText, Bed, HeartHandshake } from 'lucide-react'
+import { Heart, Thermometer, AlertTriangle, Battery, ChevronDown, ChevronUp, Wifi, FileText, Bed, HeartHandshake, Radio } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import type { DeviceState } from '../types'
@@ -8,6 +8,7 @@ import { THRESHOLDS, ROLE_PERMISSIONS } from '../types'
 import HeartRateChart from './charts/HeartRateChart'
 import TempChart from './charts/TempChart'
 import { useDeviceStore, isNurseAuthorizedForTicket } from '../store/deviceStore'
+import { getActiveNurseForPatientShift } from '../services/patientAssignmentService'
 import { useAuth } from '../hooks/useAuth'
 import DeviceReportTemplate from './DeviceReportTemplate'
 import html2canvas from 'html2canvas'
@@ -48,7 +49,50 @@ export default function DeviceCard({ device, expanded, onToggleExpanded }: Props
 
   const acknowledgeAlert = useDeviceStore(s => s.acknowledgeAlert)
   const { latest, history, alerts } = device
-  const unread = alerts.filter(a => !a.acknowledged)
+
+  // Regla de Visibilidad en Dashboard: La alerta del pulsador PBS-33B SOLO le aparece al enfermero si le corresponde el paciente.
+  // A doctores y administradores no les aparece en el dashboard.
+  const isPatientAssignedToMe = useMemo(() => {
+    if (!user || user.role !== 'nurse') return false
+
+    // 1. Asignación directa en el perfil del paciente
+    if (device.profile?.assignedNurseId && device.profile.assignedNurseId === user.id) return true
+    if (user.fullName && device.profile?.assignedNurseName &&
+        device.profile.assignedNurseName.trim().toLowerCase() === user.fullName.trim().toLowerCase()) {
+      return true
+    }
+
+    // 2. Asignación de turno asistencial activo (patient_shift_assignments)
+    const activeShift = getActiveNurseForPatientShift(device.deviceId)
+    if (activeShift.hasAssignedNurse && activeShift.nurseId === user.id) return true
+
+    // 3. Alertas de emergencia del dispositivo asignadas a este enfermero
+    const hasAssignedEmergency = device.alerts.some(
+      a => (a.type === 'emergency_button' || a.origin === 'EMERGENCY_BUTTON') && isNurseAuthorizedForTicket(a, user)
+    )
+    if (hasAssignedEmergency) return true
+
+    // 4. Compatibilidad con credencial de demostración
+    if (user.email === 'enfermero@healthnet.com') {
+      if (device.profile?.assignedNurseId === 'a0000000-0000-0000-0000-000000000003' ||
+          device.profile?.assignedNurseName?.includes('Carlos Domínguez') ||
+          activeShift.nurseId === 'a0000000-0000-0000-0000-000000000003') {
+        return true
+      }
+    }
+
+    return false
+  }, [user, device])
+
+  const unread = alerts.filter(a => {
+    if (a.acknowledged) return false
+    const isButtonEmergency = a.type === 'emergency_button' || a.origin === 'EMERGENCY_BUTTON'
+    if (isButtonEmergency) {
+      if (!user || user.role !== 'nurse') return false
+      return isNurseAuthorizedForTicket(a, user)
+    }
+    return true
+  })
   const [generatingPdf, setGeneratingPdf] = useState(false)
 
   if (!latest) return null
@@ -179,6 +223,17 @@ export default function DeviceCard({ device, expanded, onToggleExpanded }: Props
           </div>
         </div>
       </div>
+
+      {/* Emergency Button banner (PBS-33B) - En Dashboard solo visible para el enfermero si le corresponde el paciente */}
+      {isPatientAssignedToMe && (latest.emergencyButtonPressed || latest.emergencyButton?.pressed) && (
+        <div className="mx-4 mb-3 flex items-center justify-between bg-red-100 dark:bg-red-950/80 border border-red-300 dark:border-red-700 rounded-xl px-3 py-2 animate-pulse">
+          <div className="flex items-center gap-2">
+            <Radio size={16} className="text-red-600 dark:text-red-400 animate-pulse flex-shrink-0" />
+            <p className="text-red-700 dark:text-red-300 text-xs font-black uppercase tracking-wider">¡BOTÓN SOS ACTIVADO (PBS-33B)!</p>
+          </div>
+          <span className="text-[10px] font-bold text-red-600 dark:text-red-400">Auxilio Solicitado</span>
+        </div>
+      )}
 
       {/* Fall alert banner */}
       {latest.fallDetected && (

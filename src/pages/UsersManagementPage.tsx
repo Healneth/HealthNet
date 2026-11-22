@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Users, UserPlus, Shield, Stethoscope, HeartHandshake,
   Search, CheckCircle2, XCircle, Edit2, ShieldAlert,
@@ -10,6 +11,7 @@ import {
   AlertCircle, Eye, ArrowRight, KeyRound
 } from 'lucide-react'
 import { parseISO, addDays, format } from 'date-fns'
+import { formatToE164 } from '../utils/phoneValidator'
 import { getSystemUsers, saveSystemUsers, updateSystemUserStatus } from '../services/auth'
 import { patientsService } from '../services/patients'
 import { logAuditEvent } from '../utils/auditLogger'
@@ -51,9 +53,16 @@ export default function UsersManagementPage() {
   // - Doctor: Únicamente puede consultar 'assignments' (Enfermeros Responsables de sus pacientes).
   //   NO puede ver ni 'users' (Personal y Cuentas RBAC) ni 'shifts' (Programación Semanal de Turnos).
   // - Enfermero: Inicia en 'shifts' (Mi Turno) y puede consultar 'assignments' (Mis Pacientes).
-  const [activeTab, setActiveTab] = useState<'users' | 'shifts' | 'assignments'>(
-    isDoctor ? 'assignments' : isNurse ? 'shifts' : 'users'
-  )
+  const [searchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const roleParam = searchParams.get('role')
+
+  const [activeTab, setActiveTab] = useState<'users' | 'shifts' | 'assignments'>(() => {
+    if (tabParam === 'shifts' && !isDoctor) return 'shifts'
+    if (tabParam === 'assignments') return 'assignments'
+    if (tabParam === 'users' && !isDoctor && !isNurse) return 'users'
+    return isDoctor ? 'assignments' : isNurse ? 'shifts' : 'users'
+  })
 
   // Salvaguarda: Forzar que el Doctor permanezca estrictamente en 'assignments' y el enfermero no entre a 'users'
   useEffect(() => {
@@ -66,8 +75,22 @@ export default function UsersManagementPage() {
 
   const [users, setUsers] = useState<SystemUser[]>([])
   const [search, setSearch] = useState('')
-  const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all')
+  const [roleFilter, setRoleFilter] = useState<'all' | UserRole>(() => {
+    if (roleParam && ['admin', 'doctor', 'nurse'].includes(roleParam)) {
+      return roleParam as UserRole
+    }
+    return 'all'
+  })
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all')
+
+  useEffect(() => {
+    if (roleParam && ['admin', 'doctor', 'nurse'].includes(roleParam)) {
+      setRoleFilter(roleParam as UserRole)
+    }
+    if (tabParam === 'shifts' && !isDoctor) {
+      setActiveTab('shifts')
+    }
+  }, [roleParam, tabParam, isDoctor])
 
   // Modal de confirmación para suspender cuenta (RBAC)
   const [suspensionModalTarget, setSuspensionModalTarget] = useState<SystemUser | null>(null)
@@ -710,6 +733,13 @@ export default function UsersManagementPage() {
       return
     }
 
+    const phoneValidation = formatToE164(phoneNumber)
+    if (!phoneValidation.isValid) {
+      setErrorMsg(phoneValidation.error || 'Número de teléfono inválido para AWS Messaging (SMS).')
+      return
+    }
+    const finalPhone = phoneValidation.e164
+
     if (editingUser) {
       const updated = users.map(u => {
         if (u.id === editingUser.id) {
@@ -717,7 +747,7 @@ export default function UsersManagementPage() {
             ...u,
             fullName: fullName.trim(),
             email: email.trim().toLowerCase(),
-            phoneNumber: phoneNumber.trim(),
+            phoneNumber: finalPhone,
             role,
             defaultShift: role === 'nurse' ? defaultShift : undefined,
           }
@@ -726,7 +756,7 @@ export default function UsersManagementPage() {
       })
       setUsers(updated)
       saveSystemUsers(updated)
-      setSuccessMsg(`Usuario ${fullName} actualizado correctamente.`)
+      setSuccessMsg(`Usuario ${fullName} actualizado correctamente (${phoneValidation.formattedDisplay}).`)
     } else {
       if (users.some(u => u.email.toLowerCase() === email.trim().toLowerCase())) {
         setErrorMsg('Ya existe una cuenta registrada con este correo electrónico.')
@@ -738,7 +768,7 @@ export default function UsersManagementPage() {
         email: email.trim().toLowerCase(),
         fullName: fullName.trim(),
         role,
-        phoneNumber: phoneNumber.trim(),
+        phoneNumber: finalPhone,
         defaultShift: role === 'nurse' ? defaultShift : undefined,
         isActive: true,
         createdAt: new Date().toISOString(),
@@ -3178,7 +3208,7 @@ export default function UsersManagementPage() {
 
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">
-                  Teléfono Móvil (Avisos de Emergencia)
+                  Teléfono Móvil (Avisos de Emergencia AWS Messaging)
                 </label>
                 <div className="relative">
                   <Phone size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -3191,6 +3221,9 @@ export default function UsersManagementPage() {
                     className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-hn-800/30 font-bold"
                   />
                 </div>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Formato internacional E.164 para AWS SMS (ej. +52 664 123 4567 o 10 dígitos locales).
+                </p>
               </div>
 
               <div>

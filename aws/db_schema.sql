@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS clinical_measurements (
     heart_rate INT NOT NULL CHECK (heart_rate >= 0),
     temperature NUMERIC(4, 2) NOT NULL CHECK (temperature >= 20.00 AND temperature <= 45.00),
     fall_detected BOOLEAN NOT NULL DEFAULT FALSE,
+    emergency_pressed BOOLEAN NOT NULL DEFAULT FALSE,
     is_simulated BOOLEAN NOT NULL DEFAULT FALSE,
     battery_level INT,
     accel_x NUMERIC(5, 2),
@@ -234,6 +235,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
     device_id VARCHAR(50) REFERENCES bracelets(device_id) ON DELETE SET NULL,
     type VARCHAR(40) NOT NULL,
+    origin VARCHAR(40) DEFAULT 'SENSOR',
+    event_id VARCHAR(100),
     title VARCHAR(200),
     criticality VARCHAR(20) NOT NULL DEFAULT 'MEDIA' CHECK (LOWER(criticality) IN ('baja', 'media', 'alta', 'critica')),
     clinical_value VARCHAR(150),
@@ -249,6 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_folio ON alerts (folio);
 CREATE INDEX IF NOT EXISTS idx_alerts_patient_status ON alerts (patient_id, current_status);
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_assigned_nurse ON alerts (assigned_nurse_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alerts_event_id ON alerts(event_id) WHERE event_id IS NOT NULL;
 
 -- ──────────────────────────────────────────────────────────────────────
 -- 11. TABLA: alert_tracking (Seguimiento Clínico de Alertas)
@@ -287,6 +291,8 @@ CREATE TABLE IF NOT EXISTS tickets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     folio VARCHAR(30) NOT NULL UNIQUE,
     alert_id VARCHAR(100),
+    origin VARCHAR(40) DEFAULT 'SENSOR',
+    event_id VARCHAR(100),
     patient_id VARCHAR(50) NOT NULL,
     patient_uuid UUID REFERENCES patients(id) ON DELETE SET NULL,
     patient_name VARCHAR(150) NOT NULL,
@@ -320,6 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets (status);
 CREATE INDEX IF NOT EXISTS idx_tickets_criticality ON tickets (criticality);
 CREATE INDEX IF NOT EXISTS idx_tickets_shift ON tickets (shift_type);
 CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets (created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tickets_event_id ON tickets(event_id) WHERE event_id IS NOT NULL;
 
 -- Notas Clínicas Inmutables
 CREATE TABLE IF NOT EXISTS ticket_notes (
@@ -444,5 +451,31 @@ INSERT INTO users (id, role_id, email, full_name, phone_number, is_active, defau
 ('a0000000-0000-0000-0000-000000000004', 'nurse', 'ana.ruiz@healthnet.com', 'Lic. Ana Ruiz Morales', '+52 664 456 7890', TRUE, 'vespertino'),
 ('a0000000-0000-0000-0000-000000000005', 'nurse', 'elena.soto@healthnet.com', 'Lic. Elena Soto Vargas', '+52 664 567 8901', TRUE, 'nocturno')
 ON CONFLICT (email) DO NOTHING;
+
+-- ──────────────────────────────────────────────────────────────────────
+-- PROTECCIÓN DE ALERTAS Y TICKETS DE EMERGENCIA (INMUTABILIDAD CLÍNICA)
+-- ──────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION trg_protect_emergency_alerts()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_TABLE_NAME = 'alerts' AND (OLD.origin = 'EMERGENCY_BUTTON' OR OLD.type = 'emergency_button')) OR
+       (TG_TABLE_NAME = 'tickets' AND (OLD.origin = 'EMERGENCY_BUTTON' OR OLD.alert_type = 'emergency_button')) THEN
+        RAISE EXCEPTION 'Regla de Integridad Clínica: Las alertas y tickets originados por el Botón de Emergencia PBS-33B son inmutables y no pueden eliminarse del registro asistencial.';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_prevent_delete_emergency_alerts ON alerts;
+CREATE TRIGGER trg_prevent_delete_emergency_alerts
+    BEFORE DELETE ON alerts
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_protect_emergency_alerts();
+
+DROP TRIGGER IF EXISTS trg_prevent_delete_emergency_tickets ON tickets;
+CREATE TRIGGER trg_prevent_delete_emergency_tickets
+    BEFORE DELETE ON tickets
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_protect_emergency_alerts();
 
 COMMIT;

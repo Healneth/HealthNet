@@ -43,8 +43,9 @@ export default function SmartwatchSimulator({
     return () => clearInterval(timer)
   }, [])
 
-  const hasAlert = isEmergency || (telemetry ? telemetry.fallDetected : false)
-  const alertText = emergencyMsg || (telemetry?.fallDetected ? '¡CAÍDA DETECTADA!' : '')
+  const isButtonPressed = Boolean(telemetry?.emergencyButtonPressed || telemetry?.emergencyButton?.pressed)
+  const hasAlert = isEmergency || (telemetry ? telemetry.fallDetected : false) || isButtonPressed
+  const alertText = emergencyMsg || (isButtonPressed ? '¡BOTÓN SOS ACTIVADO!' : telemetry?.fallDetected ? '¡CAÍDA DETECTADA!' : '')
 
   const isDark = watchTheme === 'dark'
 

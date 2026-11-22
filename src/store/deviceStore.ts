@@ -14,10 +14,11 @@ import type {
   ShiftType,
 } from '../types'
 import { THRESHOLDS } from '../types'
-import { patientsService } from '../services/patients'
+import { patientsService, setDeviceStoreRef } from '../services/patients'
 import { logAuditEvent } from '../utils/auditLogger'
 import { simulatorService } from '../services/simulator'
-import { getActiveNurseForPatientShift } from '../services/patientAssignmentService'
+import { getActiveNurseForPatientShift, getAllPatientShiftAssignments } from '../services/patientAssignmentService'
+import { getSystemUsers } from '../services/auth'
 
 function getCurrentAuthUser(): AuthUser | null {
   try {
@@ -37,6 +38,7 @@ interface DeviceStore {
 
   // Actions
   loadPatientsFromDb: () => Promise<void>
+  addAlert: (alert: Alert) => void
   upsertTelemetry: (data: DeviceTelemetry) => void
   acknowledgeAlert: (alertId: string) => void
   updateAlertStatus: (
@@ -588,6 +590,25 @@ export const removeDeletedDevice = (deviceId: string) => {
   } catch {}
 }
 
+const ALERTS_STORAGE_KEY = 'healthnet_clinical_alerts'
+
+export const loadPersistedAlerts = (): Alert[] => {
+  try {
+    const raw = localStorage.getItem(ALERTS_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    }
+  } catch {}
+  return INITIAL_MOCK_ALERTS
+}
+
+export const savePersistedAlerts = (alerts: Alert[]) => {
+  try {
+    localStorage.setItem(ALERTS_STORAGE_KEY, JSON.stringify(alerts))
+  } catch {}
+}
+
 const loadInitialDevices = (): Record<string, DeviceState> => {
   const deletedDevices = loadDeletedDevices()
   const savedSettings = loadSettingsMap()
@@ -628,6 +649,19 @@ const loadInitialDevices = (): Record<string, DeviceState> => {
       }
     }
   }
+
+  // Vincular alertas guardadas para que cada paciente mantenga su historial de alertas
+  const persistedAlerts = loadPersistedAlerts()
+  persistedAlerts.forEach(a => {
+    if (devices[a.deviceId]) {
+      const existing = devices[a.deviceId].alerts || []
+      const exists = existing.some(ex => (a.eventId && ex.eventId === a.eventId) || (a.folio && ex.folio === a.folio) || ex.id === a.id)
+      if (!exists) {
+        devices[a.deviceId].alerts = [a, ...existing]
+      }
+    }
+  })
+
   return devices
 }
 
@@ -684,6 +718,13 @@ const generateAlertId = () => `alert-${Date.now()}-${Math.random().toString(36).
 export function isNurseAuthorizedForTicket(ticket: Alert, user: AuthUser): boolean {
   if (user.role !== 'nurse') return false
 
+  const isEmergency = ticket.type === 'emergency_button' || ticket.origin === 'EMERGENCY_BUTTON'
+
+  // Regla 2: Si es una alerta de emergencia y no tiene enfermero asignado, nadie tiene autorización operativa directa
+  if (isEmergency && (ticket.isUnassigned || (!ticket.nurseId && !ticket.assignedNurseName))) {
+    return false
+  }
+
   // 1. Coincidencia por ID de enfermero asignado
   if (ticket.nurseId && ticket.nurseId === user.id) return true
 
@@ -697,8 +738,16 @@ export function isNurseAuthorizedForTicket(ticket: Alert, user: AuthUser): boole
     return true
   }
 
-  // 3. Compatibilidad con credencial de demostración de enfermero
+  // 3. Compatibilidad con credencial de demostración de enfermero (Carlos Domínguez)
   if (user.email === 'enfermero@healthnet.com') {
+    if (isEmergency) {
+      if (ticket.nurseId === 'a0000000-0000-0000-0000-000000000003' ||
+          ticket.assignedNurseName?.includes('Carlos Domínguez') || ticket.assignedTo?.includes('Carlos Domínguez')) {
+        return true
+      }
+      return false
+    }
+
     if (!ticket.nurseId || ticket.nurseId === 'a0000000-0000-0000-0000-000000000003' ||
         ticket.assignedNurseName?.includes('Carlos Domínguez') || ticket.assignedTo?.includes('Carlos Domínguez')) {
       return true
@@ -707,6 +756,9 @@ export function isNurseAuthorizedForTicket(ticket: Alert, user: AuthUser): boole
 
   return false
 }
+
+// Conjunto de eventIds de emergencia procesados para deduplicación estricta en memoria
+const processedEmergencyEventIds = new Set<string>()
 
 function detectAlerts(
   prev: DeviceState | undefined,
@@ -730,21 +782,24 @@ function detectAlerts(
   const patientId = prev?.profile?.id
 
   const buildTicketMetadata = (
-    type: 'fall' | 'high_hr' | 'low_hr' | 'high_temp',
+    type: 'fall' | 'high_hr' | 'low_hr' | 'high_temp' | 'emergency_button' | string,
     title: string,
     description: string,
     clinicalValue: string,
     criticality: 'baja' | 'media' | 'alta' | 'critica' | 'CRITICA' | 'ALTA' | 'MEDIA' | 'BAJA',
-    message: string
+    message: string,
+    origin: string = 'SENSOR',
+    eventId?: string
   ): Alert => {
     const alertId = generateAlertId()
     const folio = `TCK-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`
+    const finalEventId = eventId || `ev-${alertId}`
     const initialActivity: TicketActivity[] = [
       {
         id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         ticketId: alertId,
         action: 'CREADO',
-        description: `Ticket generado automáticamente por alerta de ${title} (${clinicalValue}).`,
+        description: `Ticket generado automáticamente por ${title} (${clinicalValue}).`,
         performedBy: 'Sistema HealthNet',
         performedByRole: 'system',
         timestamp: now,
@@ -765,6 +820,8 @@ function detectAlerts(
     return {
       id: alertId,
       folio,
+      eventId: finalEventId,
+      origin,
       deviceId: data.deviceId,
       patientId,
       patientName,
@@ -793,6 +850,10 @@ function detectAlerts(
     }
   }
 
+  // Las alertas del pulsador de emergencia físico PBS-33B se procesan y originan EXCLUSIVAMENTE
+  // en el backend central (Regla 3). El frontend nunca crea tickets ni asignaciones por su cuenta.
+  // Aquí únicamente se analizan límites biométricos locales (acelerómetro, pulso, temperatura).
+
   if (data.fallDetected) {
     alerts.push(
       buildTicketMetadata(
@@ -801,7 +862,8 @@ function detectAlerts(
         'El sensor acelerométrico ha detectado un impacto súbito en el paciente con patrón de desaceleración brusca.',
         'Impacto Acelerométrico',
         'critica',
-        `¡Caída detectada en ${patientName}!`
+        `¡Caída detectada en ${patientName}!`,
+        'FALL_DETECTION'
       )
     )
   }
@@ -814,7 +876,8 @@ function detectAlerts(
         `El ritmo cardíaco (${data.heartRate} bpm) ha superado el umbral clínico configurado (${config.hrMax} bpm).`,
         `${data.heartRate} bpm`,
         isCritical ? 'critica' : 'alta',
-        `Ritmo cardíaco elevado: ${data.heartRate} bpm`
+        `Ritmo cardíaco elevado: ${data.heartRate} bpm`,
+        'VITALS_THRESHOLD'
       )
     )
   }
@@ -827,7 +890,8 @@ function detectAlerts(
         `El ritmo cardíaco (${data.heartRate} bpm) ha descendido por debajo del umbral clínico (${config.hrMin} bpm).`,
         `${data.heartRate} bpm`,
         isCritical ? 'critica' : 'alta',
-        `Ritmo cardíaco bajo: ${data.heartRate} bpm`
+        `Ritmo cardíaco bajo: ${data.heartRate} bpm`,
+        'VITALS_THRESHOLD'
       )
     )
   }
@@ -840,23 +904,27 @@ function detectAlerts(
         `La temperatura corporal (${data.temperature.toFixed(1)}°C) superó el umbral clínico (${config.tempMax}°C).`,
         `${data.temperature.toFixed(1)} °C`,
         isHigh ? 'alta' : 'media',
-        `Temperatura elevada: ${data.temperature.toFixed(1)}°C`
+        `Temperatura elevada: ${data.temperature.toFixed(1)}°C`,
+        'VITALS_THRESHOLD'
       )
     )
   }
 
-  // Suppress duplicates if prev already has same type unacknowledged
+  // Suppress duplicates if prev already has same type unacknowledged or same eventId
   if (prev) {
-    return alerts.filter(a =>
-      !prev.alerts.some(p => p.type === a.type && !p.acknowledged)
-    )
+    return alerts.filter(a => {
+      if (a.eventId && prev.alerts.some(p => p.eventId === a.eventId)) {
+        return false
+      }
+      return !prev.alerts.some(p => p.type === a.type && !p.acknowledged && p.status !== 'completado')
+    })
   }
   return alerts
 }
 
 export const useDeviceStore = create<DeviceStore>((set) => ({
   devices: loadInitialDevices(),
-  alerts: INITIAL_MOCK_ALERTS,
+  alerts: loadPersistedAlerts(),
   theme: loadSystemTheme(),
   sidebarCollapsed: loadSidebarCollapsed(),
   sidebarVisible: loadSidebarVisibility(),
@@ -868,48 +936,110 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
         patientsService.getAlerts()
       ])
       
-      if (patients.length === 0) {
-        set({ alerts: dbAlerts })
+      // Si la API remota no devolvió registros (modo local o API en despliegue), preservar estado local sin vaciar nada
+      if (patients.length === 0 && dbAlerts.length === 0) {
         return
       }
 
       set((state) => {
         const deletedDevices = loadDeletedDevices()
         const updatedDevices = { ...state.devices }
-        patients.forEach((p) => {
-          if (deletedDevices.includes(p.deviceId)) return
-          const prev = updatedDevices[p.deviceId]
-          
-          // Guardar en copia local de respaldo
-          const settingsMap = loadSettingsMap()
-          settingsMap[p.deviceId] = {
-            profile: p.profile,
-            config: p.config
-          }
-          saveSettingsMap(settingsMap)
-          
-          // Filtrar alertas para este dispositivo
-          const deviceAlerts = dbAlerts.filter(a => a.deviceId === p.deviceId)
 
-          updatedDevices[p.deviceId] = {
-            deviceId: p.deviceId,
-            patientName: p.patientName,
-            connected: prev?.connected ?? false,
-            lastSeen: prev?.lastSeen ?? 0,
-            latest: prev?.latest ?? null,
-            history: prev?.history ?? [],
-            alerts: deviceAlerts,
-            profile: p.profile,
-            config: p.config,
-            isArchived: Boolean(p.profile?.isArchived),
-            braceletStatus: p.profile?.isArchived ? 'NO_EN_USO' : 'ASIGNADO',
-          }
-        })
-        return { devices: updatedDevices, alerts: dbAlerts }
+        // Si llegaron pacientes de la BD remota, sincronizar catálogo
+        if (patients.length > 0) {
+          patients.forEach((p) => {
+            if (deletedDevices.includes(p.deviceId)) return
+            const prev = updatedDevices[p.deviceId]
+            
+            // Guardar en copia local de respaldo
+            const settingsMap = loadSettingsMap()
+            settingsMap[p.deviceId] = {
+              profile: p.profile,
+              config: p.config
+            }
+            saveSettingsMap(settingsMap)
+            
+            // Mezclar alertas del dispositivo preservando las locales existentes
+            const existingDevAlerts = prev?.alerts || []
+            const newDeviceDbAlerts = dbAlerts.filter(a => a.deviceId === p.deviceId)
+            const mergedDevAlerts = [...existingDevAlerts]
+            newDeviceDbAlerts.forEach(dbA => {
+              const idx = mergedDevAlerts.findIndex(a =>
+                (dbA.eventId && a.eventId === dbA.eventId) ||
+                (dbA.folio && a.folio === dbA.folio) ||
+                a.id === dbA.id
+              )
+              if (idx >= 0) {
+                mergedDevAlerts[idx] = { ...mergedDevAlerts[idx], ...dbA }
+              } else {
+                mergedDevAlerts.unshift(dbA)
+              }
+            })
+
+            updatedDevices[p.deviceId] = {
+              deviceId: p.deviceId,
+              patientName: p.patientName,
+              connected: prev?.connected ?? false,
+              lastSeen: prev?.lastSeen ?? 0,
+              latest: prev?.latest ?? null,
+              history: prev?.history ?? [],
+              alerts: mergedDevAlerts,
+              profile: p.profile,
+              config: p.config,
+              isArchived: Boolean(p.profile?.isArchived),
+              braceletStatus: p.profile?.isArchived ? 'NO_EN_USO' : 'ASIGNADO',
+            }
+          })
+        }
+
+        // Combinar alertas remotas con las locales sin borrar las existentes
+        const mergedAlerts = [...state.alerts]
+        if (dbAlerts.length > 0) {
+          dbAlerts.forEach((dbA) => {
+            const idx = mergedAlerts.findIndex(a =>
+              (dbA.eventId && a.eventId === dbA.eventId) ||
+              (dbA.folio && a.folio === dbA.folio) ||
+              a.id === dbA.id
+            )
+            if (idx >= 0) {
+              mergedAlerts[idx] = { ...mergedAlerts[idx], ...dbA }
+            } else {
+              mergedAlerts.unshift(dbA)
+            }
+          })
+          savePersistedAlerts(mergedAlerts)
+        }
+
+        return { devices: updatedDevices, alerts: mergedAlerts }
       })
     } catch (err) {
       console.error('[Store] Error cargando pacientes de la BD:', err)
     }
+  },
+
+  addAlert: (alert) => {
+    set((state) => {
+      // Evitar duplicados por id, eventId o folio
+      const exists = state.alerts.some(a => (alert.eventId && a.eventId === alert.eventId) || a.id === alert.id || (alert.folio && a.folio === alert.folio))
+      if (exists) return state
+
+      const dev = state.devices[alert.deviceId]
+      const updatedDevices = dev ? {
+        ...state.devices,
+        [alert.deviceId]: {
+          ...dev,
+          alerts: [alert, ...(dev.alerts || [])]
+        }
+      } : state.devices
+
+      const updatedAlerts = [alert, ...state.alerts]
+      savePersistedAlerts(updatedAlerts)
+
+      return {
+        alerts: updatedAlerts,
+        devices: updatedDevices
+      }
+    })
   },
 
   upsertTelemetry: (data) => {
@@ -968,8 +1098,9 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
         // Registrar paciente nuevo en la base de datos de manera asíncrona
         patientsService.savePatient(data.deviceId, settings.profile, settings.config)
           .catch(err => console.error('[Store] Error al auto-registrar paciente nuevo en BD:', err))
-      } else if (data.patientName && settings.profile.name !== data.patientName) {
-        // Auto-actualizar el nombre si es una simulación nueva con nombre diferente (ej. de Ana García a Josuar Andreo)
+      } else if (data.isSimulated && data.patientName && settings.profile.name !== data.patientName) {
+        // Regla de Oro: Solo actualizar nombre dinámicamente si es un brazalete de prueba dentro del simulador.
+        // Si es un dispositivo real conectado a AWS IoT, los datos registrados en la BD tienen prioridad absoluta y no se falsifican.
         settings.profile.name = data.patientName
         settingsMap[data.deviceId] = settings
         saveSettingsMap(settingsMap)
@@ -988,6 +1119,15 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           .catch(err => console.error('[Store] Error guardando nueva alerta:', err))
       })
 
+      // Si es un dispositivo físico real (no simulado), persistir la medición en AWS RDS (clinical_measurements)
+      if (!data.isSimulated) {
+        patientsService.saveMeasurement(data.deviceId, {
+          heartRate: data.heartRate,
+          temperature: data.temperature,
+          timestamp: data.timestamp,
+        }).catch(err => console.warn('[Store] Medición clínica guardada localmente (esperando reconexión RDS):', err))
+      }
+
       const history = [
         ...(prev?.history ?? []),
         data,
@@ -1005,9 +1145,14 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
         config: settings.config,
       }
 
+      const updatedAlerts = [...state.alerts, ...newAlerts]
+      if (newAlerts.length > 0) {
+        savePersistedAlerts(updatedAlerts)
+      }
+
       return {
         devices: { ...state.devices, [data.deviceId]: device },
-        alerts: [...state.alerts, ...newAlerts],
+        alerts: updatedAlerts,
       }
     })
   },
@@ -1151,6 +1296,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           alerts: updatedDevices[id].alerts.map(updateAlertRecord),
         }
       }
+      savePersistedAlerts(updatedAlerts)
 
       return { alerts: updatedAlerts, devices: updatedDevices }
     })
@@ -1215,6 +1361,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           alerts: updatedDevices[dId].alerts.map(updateAlert),
         }
       }
+      savePersistedAlerts(updatedAlerts)
       return { alerts: updatedAlerts, devices: updatedDevices }
     })
 
@@ -1326,6 +1473,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           alerts: updatedDevices[dId].alerts.map(updateAlert),
         }
       }
+      savePersistedAlerts(updatedAlerts)
       return { alerts: updatedAlerts, devices: updatedDevices }
     })
 
@@ -1355,6 +1503,26 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
 
     if (!isNurseAuthorizedForTicket(targetTicket, authUser)) {
       throw new Error(`Acceso Denegado (RBAC): Solo el enfermero asignado (${targetTicket.assignedNurseName || 'Sin asignar'}) puede transferir este ticket.`)
+    }
+
+    // Regla 2: Restricción estricta de asignación para alertas generadas por el pulsador de emergencia PBS-33B
+    const isEmergency = targetTicket.type === 'emergency_button' || targetTicket.origin === 'EMERGENCY_BUTTON'
+    if (isEmergency) {
+      // 1. Validar que toNurseId sea un enfermero activo registrado (NO doctor, NO admin)
+      const targetUser = getSystemUsers().find(u => u.id === toNurseId)
+      if (!targetUser || targetUser.role !== 'nurse' || !targetUser.isActive) {
+        throw new Error('Restricción de Asignación: Las alertas generadas por el pulsador de emergencia PBS-33B únicamente pueden asignarse a enfermeros registrados y activos. No se permiten doctores ni administradores como responsables.')
+      }
+      // 2. Comprobar que el enfermero tenga asignación asistencial activa con el paciente para el turno destino
+      const hasPsa = getAllPatientShiftAssignments().some(
+        a => (a.patientDeviceId === targetTicket.deviceId || a.patientDeviceId === targetTicket.patientId) &&
+             a.shiftType === toShiftType &&
+             a.nurseId === toNurseId &&
+             a.active
+      )
+      if (!hasPsa) {
+        throw new Error(`Asignación no autorizada: El enfermero '${toNurseName}' no tiene asignación asistencial activa con este paciente para el turno ${toShiftType}. Las alertas de emergencia del pulsador PBS-33B solo pueden transferirse a enfermeros formalmente relacionados con el paciente en dicho turno.`)
+      }
     }
 
     if (!reason || !reason.trim()) {
@@ -1427,6 +1595,7 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           alerts: updatedDevices[dId].alerts.map(updateAlert),
         }
       }
+      savePersistedAlerts(updatedAlerts)
       return { alerts: updatedAlerts, devices: updatedDevices }
     })
 
@@ -1738,9 +1907,9 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
           profile: updatedProfile,
         }
       }
-      // Actualizar automáticamente el responsable en las alertas activas de este paciente
+      // Actualizar automáticamente el responsable en las alertas activas de este paciente (excepto botón de emergencia PBS-33B)
       const updatedAlerts = state.alerts.map(a =>
-        a.deviceId === deviceId && !a.acknowledged
+        a.deviceId === deviceId && !a.acknowledged && a.type !== 'emergency_button' && a.origin !== 'EMERGENCY_BUTTON'
           ? { ...a, assignedTo: nurseName || undefined }
           : a
       )
@@ -2042,3 +2211,8 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
     set({ sidebarVisible: visible })
   }
 }))
+
+setDeviceStoreRef(() => useDeviceStore.getState())
+if (typeof window !== 'undefined') {
+  (window as any).__deviceStore = useDeviceStore
+}

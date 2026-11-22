@@ -56,6 +56,10 @@ MIIEowIBAAKCAQEAz2fG0wR8ZqK1tXG8T4W9Z4p...
 // ==========================================
 // 3. CONFIGURACIÓN DE PINES HARDWARE (WAVESHARE)
 // ==========================================
+// PIN DEL PULSADOR FÍSICO MOMENTÁNEO PBS-33B (Pulsador rojo de emergencia)
+// Conexión: Terminal 1 a GPIO 16; Terminal 2 a GND.
+#define PIN_PBS33B_BUTTON 16
+
 #define PIN_POWER_ON    15   
 #define I2C_SDA         42   
 #define I2C_SCL         41   
@@ -131,6 +135,14 @@ bool corazonEncendido = false;
 WiFiClientSecure netClient;
 PubSubClient mqttClient(netClient);
 
+// Variables de control para el pulsador de emergencia PBS-33B
+bool botonEmergenciaPresionado = false;
+int ultimoEstadoBotonLeido = HIGH;
+int estadoBotonEstable = HIGH;
+unsigned long ultimoTiempoCambioBoton = 0;
+const unsigned long TIEMPO_DEBOUNCE_BOTON = 40;     // 40ms de lectura estable para antirrebote eléctrico
+char ultimoEventIdEmergencia[40] = "";
+
 // Prototipos de funciones
 void configurarMAX30205();
 float leerTemperaturaMAX30205();
@@ -140,11 +152,14 @@ long leerIR_MAX30102();
 void actualizarInterfazGrafica();
 void setupWiFi();
 void connectToAWS();
+void generarUUIDv4(char* destino, size_t longitud);
+void publicarEmergenciaInmediata();
 
 // ==========================================
 // SETUP
 // ==========================================
 void setup() {
+  pinMode(PIN_PBS33B_BUTTON, INPUT_PULLUP); // Conexión a GND con pull-up interna activa
   pinMode(PIN_POWER_ON, OUTPUT);
   digitalWrite(PIN_POWER_ON, HIGH); 
   
@@ -214,6 +229,27 @@ void loop() {
   }
   mqttClient.loop();
 
+  // ── LECTURA DEL PULSADOR DE EMERGENCIA PBS-33B (Antirrebote por transición) ──
+  // No utiliza ventana de enfriamiento (cooldown) que descarte nuevas pulsaciones legítimas.
+  // Cada pulsación física confirmada genera un evento con UUID único (eventId).
+  int lecturaBoton = digitalRead(PIN_PBS33B_BUTTON);
+  if (lecturaBoton != ultimoEstadoBotonLeido) {
+    ultimoTiempoCambioBoton = tiempoActual;
+    ultimoEstadoBotonLeido = lecturaBoton;
+  }
+
+  if ((tiempoActual - ultimoTiempoCambioBoton) >= TIEMPO_DEBOUNCE_BOTON) {
+    if (lecturaBoton != estadoBotonEstable) {
+      estadoBotonEstable = lecturaBoton;
+      // Detección de flanco de bajada (contacto presionado hacia GND)
+      if (estadoBotonEstable == LOW) {
+        botonEmergenciaPresionado = true;
+        // Publicación inmediata e instantánea (Cero latencia)
+        publicarEmergenciaInmediata();
+      }
+    }
+  }
+
   if (bpmActivo) {
     long muestraIR = leerIR_MAX30102();
     if (muestraIR > 0) {
@@ -258,16 +294,17 @@ void loop() {
     ultimoEnvioAWS = tiempoActual;
 
     if (mqttClient.connected()) {
-      char payload[300];
-      // Construir el JSON de telemetría esperado por AWS Lambda
+      char payload[400];
+      // Construir el JSON de telemetría periódica identificando exclusivamente por deviceId
       snprintf(payload, sizeof(payload),
-        "{\"deviceId\":\"%s\",\"patientName\":\"%s\",\"timestamp\":%llu,\"heartRate\":%d,\"temperature\":%.2f,\"fallDetected\":%s,\"batteryLevel\":100}",
+        "{\"deviceId\":\"%s\",\"timestamp\":%llu,\"heartRate\":%d,\"temperature\":%.2f,\"fallDetected\":%s,\"batteryLevel\":100,\"emergencyButton\":{\"pressed\":%s,\"lastEventId\":\"%s\"}}",
         DEVICE_ID,
-        PATIENT_NAME,
         (unsigned long long)(time(NULL) * 1000ULL), // Unix ms (si NTP está activo, de lo contrario Lambda usará Date.now())
         beatAvg,
         tempMedida != -999.0 ? tempMedida : 36.5,
-        caidaDetectada ? "true" : "false"
+        caidaDetectada ? "true" : "false",
+        botonEmergenciaPresionado ? "true" : "false",
+        ultimoEventIdEmergencia
       );
 
       char topic[100];
@@ -278,8 +315,9 @@ void loop() {
 
       if (mqttClient.publish(topic, payload)) {
         Serial.println("Publicado correctamente en AWS!");
-        // Resetear la bandera de caída tras enviarla
+        // Resetear banderas de alerta tras el envío periódico
         caidaDetectada = false;
+        botonEmergenciaPresionado = false;
       } else {
         Serial.println("Error al publicar en AWS.");
       }
@@ -472,4 +510,87 @@ void leerAcelerometro() {
       }
     }
   }
+}
+
+// ==========================================
+// FUNCIONES DEL BOTÓN DE EMERGENCIA PBS-33B
+// ==========================================
+
+/**
+ * Genera un identificador único universal UUIDv4 basado en el generador de entropía
+ * de hardware del ESP32 (esp_random), para deduplicación estricta en AWS y Base de Datos.
+ */
+void generarUUIDv4(char* destino, size_t longitud) {
+  uint32_t r1 = esp_random();
+  uint32_t r2 = esp_random();
+  uint32_t r3 = esp_random();
+  uint32_t r4 = esp_random();
+
+  uint8_t bytes[16];
+  memcpy(&bytes[0], &r1, 4);
+  memcpy(&bytes[4], &r2, 4);
+  memcpy(&bytes[8], &r3, 4);
+  memcpy(&bytes[12], &r4, 4);
+
+  // Conformidad con RFC 4122 (Versión 4 y Variante 1)
+  bytes[6] = (bytes[6] & 0x0F) | 0x40;
+  bytes[8] = (bytes[8] & 0x3F) | 0x80;
+
+  snprintf(destino, longitud,
+    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    bytes[0], bytes[1], bytes[2], bytes[3],
+    bytes[4], bytes[5],
+    bytes[6], bytes[7],
+    bytes[8], bytes[9],
+    bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+  );
+}
+
+/**
+ * Publicación asíncrona inmediata al presionar el pulsador físico PBS-33B (Cero latencia).
+ * Emite en el topic dedicado 'healthnet/devices/{deviceId}/emergency' con QoS 1.
+ */
+void publicarEmergenciaInmediata() {
+  if (!mqttClient.connected()) {
+    connectToAWS();
+  }
+
+  // Generar UUID único para esta pulsación
+  generarUUIDv4(ultimoEventIdEmergencia, sizeof(ultimoEventIdEmergencia));
+
+  char payload[350];
+  // Regla 1: Identificación exclusiva por ID del brazalete (deviceId). Cero confianza en datos del paciente enviados por dispositivo.
+  snprintf(payload, sizeof(payload),
+    "{\"deviceId\":\"%s\",\"eventType\":\"EMERGENCY_BUTTON\",\"eventId\":\"%s\",\"timestamp\":%llu,\"pressed\":true,\"batteryLevel\":100}",
+    DEVICE_ID,
+    ultimoEventIdEmergencia,
+    (unsigned long long)(time(NULL) * 1000ULL)
+  );
+
+  char topic[120];
+  snprintf(topic, sizeof(topic), "healthnet/devices/%s/emergency", DEVICE_ID);
+
+  Serial.println("\n🚨 [PBS-33B] ¡DISPARO DE EMERGENCIA FÍSICO DETECTADO!");
+  Serial.print("Publicando en topic: "); Serial.println(topic);
+  Serial.println(payload);
+
+  if (mqttClient.publish(topic, payload)) {
+    Serial.println("¡Alerta de emergencia entregada con éxito a AWS IoT Core!");
+  } else {
+    Serial.println("Error publicando evento de emergencia en AWS IoT Core.");
+  }
+
+  // Alerta visual momentánea en pantalla TFT ST7789
+  tft.fillScreen(ROJO_NEON);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(20 + OFFSET_X, 100);
+  tft.print("EMERGENCIA SOS");
+  tft.setTextSize(1);
+  tft.setCursor(30 + OFFSET_X, 135);
+  tft.print("PULSADOR ACTIVADO");
+  tft.setCursor(25 + OFFSET_X, 155);
+  tft.print("ASISTENCIA EN CAMINO");
+  delay(1200);
+  tft.fillScreen(ST77XX_BLACK);
 }

@@ -1,13 +1,15 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useDeviceStore } from '../store/deviceStore'
 import { useAuth } from '../hooks/useAuth'
 import { getSystemUsers } from '../services/auth'
+import { getAllPatientShiftAssignments } from '../services/patientAssignmentService'
 import {
   Ticket, Inbox, Clock, CheckCircle2, AlertTriangle, AlertCircle,
   UserX, UserCheck, Search, Filter, ArrowRightLeft, Play, Send,
   Lock, ShieldAlert, FileText, HeartPulse, Building, BedDouble,
   ChevronRight, X, RefreshCw, HeartHandshake, Users, Check,
-  Activity, Calendar, Stethoscope, ClipboardList, Info
+  Activity, Calendar, Stethoscope, ClipboardList, Info, Radio
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -15,8 +17,29 @@ import type { Alert, TicketStatus, TicketCriticality, ShiftType } from '../types
 
 export default function AlertsPage() {
   const { user } = useAuth()
-  const alerts = useDeviceStore(s => s.alerts)
+  const storeAlerts = useDeviceStore(s => s.alerts)
   const devices = useDeviceStore(s => s.devices)
+
+  // Reconciliación bidireccional: garantizar que todas las alertas activas o registradas en los dispositivos
+  // aparezcan en la bitácora de tickets y alertas sin ninguna desincronización
+  const alerts = useMemo(() => {
+    const map = new Map<string, Alert>()
+    // 1. Agregar alertas del store global
+    storeAlerts.forEach(a => {
+      const key = a.eventId || a.folio || a.id
+      map.set(key, a)
+    })
+    // 2. Consolidar alertas existentes en cada dispositivo para asegurar consistencia con Monitoreo
+    Object.values(devices).forEach(dev => {
+      (dev.alerts || []).forEach(a => {
+        const key = a.eventId || a.folio || a.id
+        if (!map.has(key)) {
+          map.set(key, a)
+        }
+      })
+    })
+    return Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+  }, [storeAlerts, devices])
   const addTicketNote = useDeviceStore(s => s.addTicketNote)
   const updateTicketStatus = useDeviceStore(s => s.updateTicketStatus)
   const transferTicket = useDeviceStore(s => s.transferTicket)
@@ -26,13 +49,37 @@ export default function AlertsPage() {
   const isDoctor = user?.role === 'doctor'
   const isNurse = user?.role === 'nurse'
 
+  const [searchParams, setSearchParams] = useSearchParams()
+
   // Filtros y Búsqueda
   const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'todos' | TicketStatus>('todos')
+  const [statusFilter, setStatusFilter] = useState<'todos' | 'pendientes' | TicketStatus>('todos')
+  const [typeFilter, setTypeFilter] = useState<string>('todos')
   const [criticalityFilter, setCriticalityFilter] = useState<'todas' | TicketCriticality>('todas')
   const [shiftFilter, setShiftFilter] = useState<'todos' | ShiftType>('todos')
   const [patientFilter, setPatientFilter] = useState<string>('todos')
   const [nurseFilter, setNurseFilter] = useState<string>('todos')
+
+  // Sincronizar automáticamente con query parameters (cuando se redirige desde Dashboard)
+  useEffect(() => {
+    const s = searchParams.get('status')
+    const t = searchParams.get('type')
+    const c = searchParams.get('criticality')
+
+    if (s) {
+      if (s === 'pendientes') {
+        setStatusFilter('pendientes')
+      } else if (['recibido', 'en_progreso', 'completado'].includes(s)) {
+        setStatusFilter(s as TicketStatus)
+      }
+    }
+    if (t) {
+      setTypeFilter(t)
+    }
+    if (c && ['todas', 'baja', 'media', 'alta', 'critica'].includes(c)) {
+      setCriticalityFilter(c as TicketCriticality)
+    }
+  }, [searchParams])
 
   // Estado del Modal de Detalle
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
@@ -76,6 +123,7 @@ export default function AlertsPage() {
   }
 
   const normalizeCriticality = (t: Alert): TicketCriticality => {
+    if (t.type === 'emergency_button' || t.origin === 'EMERGENCY_BUTTON') return 'critica'
     const raw = (t.criticality || (t.type === 'fall' ? 'critica' : 'media')).toString().toLowerCase()
     if (raw.includes('critica') || raw.includes('crítica')) return 'critica'
     if (raw.includes('alta')) return 'alta'
@@ -92,6 +140,14 @@ export default function AlertsPage() {
 
   const isAssignedNurseToTicket = (ticket: Alert): boolean => {
     if (!user || user.role !== 'nurse') return false
+
+    const isEmergency = ticket.type === 'emergency_button' || ticket.origin === 'EMERGENCY_BUTTON'
+
+    // Regla 2: Si es una alerta de emergencia del botón y no tiene enfermero asignado, nadie tiene acceso operativo hasta asignarse
+    if (isEmergency && (ticket.isUnassigned || (!ticket.nurseId && !ticket.assignedNurseName))) {
+      return false
+    }
+
     if (ticket.nurseId && ticket.nurseId === user.id) return true
     if (user.fullName && ticket.assignedNurseName &&
         ticket.assignedNurseName.trim().toLowerCase() === user.fullName.trim().toLowerCase()) {
@@ -102,6 +158,14 @@ export default function AlertsPage() {
       return true
     }
     if (user.email === 'enfermero@healthnet.com') {
+      if (isEmergency) {
+        if (ticket.nurseId === 'a0000000-0000-0000-0000-000000000003' ||
+            ticket.assignedNurseName?.includes('Carlos Domínguez') || ticket.assignedTo?.includes('Carlos Domínguez')) {
+          return true
+        }
+        return false
+      }
+
       if (!ticket.nurseId || ticket.nurseId === 'a0000000-0000-0000-0000-000000000003' ||
           ticket.assignedNurseName?.includes('Carlos Domínguez') || ticket.assignedTo?.includes('Carlos Domínguez')) {
         return true
@@ -153,26 +217,35 @@ export default function AlertsPage() {
       }
 
       // 2. Filtro por Estado
-      if (statusFilter !== 'todos' && st !== statusFilter) {
+      if (statusFilter === 'pendientes') {
+        if (st === 'completado') return false
+      } else if (statusFilter !== 'todos' && st !== statusFilter) {
         return false
       }
 
-      // 3. Filtro por Criticidad
+      // 3. Filtro por Tipo de Evento / Alerta
+      if (typeFilter !== 'todos') {
+        if (typeFilter === 'fall' && ticket.type !== 'fall') return false
+        if (typeFilter === 'emergency_button' && ticket.type !== 'emergency_button' && ticket.origin !== 'EMERGENCY_BUTTON') return false
+        if (typeFilter === 'signos' && (ticket.type === 'fall' || ticket.type === 'emergency_button' || ticket.origin === 'EMERGENCY_BUTTON')) return false
+      }
+
+      // 4. Filtro por Criticidad
       if (criticalityFilter !== 'todas' && crit !== criticalityFilter) {
         return false
       }
 
-      // 4. Filtro por Turno
+      // 5. Filtro por Turno
       if (shiftFilter !== 'todos' && shift !== shiftFilter) {
         return false
       }
 
-      // 5. Filtro por Paciente
+      // 6. Filtro por Paciente
       if (patientFilter !== 'todos' && ticket.deviceId !== patientFilter) {
         return false
       }
 
-      // 6. Filtro por Enfermero / Asignación
+      // 7. Filtro por Enfermero / Asignación
       if (nurseFilter === 'mis_tickets') {
         if (!isAssignedNurseToTicket(ticket)) return false
       } else if (nurseFilter === 'sin_asignar') {
@@ -189,7 +262,7 @@ export default function AlertsPage() {
 
       return true
     })
-  }, [alerts, devices, searchQuery, statusFilter, criticalityFilter, shiftFilter, patientFilter, nurseFilter, user, availableNurses])
+  }, [alerts, devices, searchQuery, statusFilter, typeFilter, criticalityFilter, shiftFilter, patientFilter, nurseFilter, user, availableNurses])
 
   // Ticket seleccionado actualmente
   const selectedTicket = useMemo(() => {
@@ -286,13 +359,33 @@ export default function AlertsPage() {
     }
   }
 
+  const isEmergencySelectedTicket = Boolean(
+    selectedTicket && (selectedTicket.type === 'emergency_button' || selectedTicket.origin === 'EMERGENCY_BUTTON')
+  )
+
+  // Regla 2: Enfermeros elegibles para transferencia (para emergencias, exclusivamente enfermeros asignados al paciente en el turno)
+  const transferEligibleNurses = useMemo(() => {
+    if (!selectedTicket) return []
+    if (!isEmergencySelectedTicket) {
+      return availableNurses.filter(n => n.id !== user?.id)
+    }
+
+    const assignments = getAllPatientShiftAssignments().filter(
+      a => (a.patientDeviceId === selectedTicket.deviceId || a.patientDeviceId === selectedTicket.patientId) &&
+           a.shiftType === transferTargetShift &&
+           a.active
+    )
+    const allowedNurseIds = new Set(assignments.map(a => a.nurseId))
+    return availableNurses.filter(n => allowedNurseIds.has(n.id) && n.id !== user?.id)
+  }, [selectedTicket, isEmergencySelectedTicket, availableNurses, transferTargetShift, user?.id])
+
   const handleOpenTransferModal = () => {
     setIsTransferModal(true)
     setTransferReason('')
-    // Default to the first available nurse who is not the current user
-    const otherNurses = availableNurses.filter(n => n.id !== user?.id)
-    if (otherNurses.length > 0) {
-      setTransferTargetNurseId(otherNurses[0].id)
+    if (transferEligibleNurses.length > 0) {
+      setTransferTargetNurseId(transferEligibleNurses[0].id)
+    } else {
+      setTransferTargetNurseId('')
     }
   }
 
@@ -347,15 +440,18 @@ export default function AlertsPage() {
   const handleClearFilters = () => {
     setSearchQuery('')
     setStatusFilter('todos')
+    setTypeFilter('todos')
     setCriticalityFilter('todas')
     setShiftFilter('todos')
     setPatientFilter('todos')
     setNurseFilter('todos')
+    setSearchParams({})
   }
 
   const hasActiveFilters = Boolean(
-    searchQuery || statusFilter !== 'todos' || criticalityFilter !== 'todas' ||
-    shiftFilter !== 'todos' || patientFilter !== 'todos' || nurseFilter !== 'todos'
+    searchQuery || statusFilter !== 'todos' || typeFilter !== 'todos' ||
+    criticalityFilter !== 'todas' || shiftFilter !== 'todos' || patientFilter !== 'todos' ||
+    nurseFilter !== 'todos'
   )
 
   return (
@@ -540,7 +636,7 @@ export default function AlertsPage() {
         </div>
 
         {/* Controles de Filtros */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 pt-1">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 pt-1">
           {/* Filtro por Estado */}
           <div>
             <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1">
@@ -552,9 +648,27 @@ export default function AlertsPage() {
               className="w-full p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:ring-2 focus:ring-hn-800/30"
             >
               <option value="todos">Todos los Estados</option>
+              <option value="pendientes">Pendientes (Recibidos + En Curso)</option>
               <option value="recibido">Recibidos</option>
               <option value="en_progreso">En Progreso</option>
               <option value="completado">Completados</option>
+            </select>
+          </div>
+
+          {/* Filtro por Tipo de Evento / Alerta */}
+          <div>
+            <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1">
+              Tipo de Evento Clínico
+            </label>
+            <select
+              value={typeFilter}
+              onChange={e => setTypeFilter(e.target.value)}
+              className="w-full p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:ring-2 focus:ring-hn-800/30"
+            >
+              <option value="todos">Todos los Eventos</option>
+              <option value="fall">Caídas Detectadas</option>
+              <option value="emergency_button">Pulsador PBS-33B</option>
+              <option value="signos">Signos Vitales Alterados</option>
             </select>
           </div>
 
@@ -653,6 +767,38 @@ export default function AlertsPage() {
         </div>
       </div>
 
+      {/* Banner Informativo de Filtros Activos Aplicados desde Dashboard */}
+      {(statusFilter === 'pendientes' || typeFilter === 'fall' || criticalityFilter === 'critica') && (
+        <div className="bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 rounded-3xl p-4 flex items-center justify-between gap-3 text-xs shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-sky-600 text-white flex items-center justify-center font-bold flex-shrink-0 shadow-sm">
+              <Filter size={18} />
+            </div>
+            <div>
+              <p className="text-sky-900 dark:text-sky-200 font-bold">
+                Filtro automático aplicado desde el Dashboard:{' '}
+                <span className="underline font-black">
+                  {typeFilter === 'fall'
+                    ? 'Caídas Detectadas'
+                    : statusFilter === 'pendientes'
+                    ? 'Alertas Pendientes de Atención'
+                    : 'Alertas Críticas'}
+                </span>
+              </p>
+              <p className="text-sky-700 dark:text-sky-400 text-[11px] mt-0.5">
+                Mostrando {filteredTickets.length} de {alerts.length} registros que conforman este indicador clínico.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleClearFilters}
+            className="px-3.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-300 font-bold hover:bg-sky-100 transition-colors cursor-pointer text-xs flex-shrink-0"
+          >
+            Ver Todas las Alertas
+          </button>
+        </div>
+      )}
+
       {/* ───────────────────────────────────────────────────────── */}
       {/* 4. TABLA PRINCIPAL DE TICKETS CLÍNICOS */}
       {/* ───────────────────────────────────────────────────────── */}
@@ -744,17 +890,25 @@ export default function AlertsPage() {
 
                       {/* Evento Clínico */}
                       <td className="px-5 py-4 max-w-xs">
+                        <div className="flex items-center gap-1.5 mb-1">
+                          {(ticket.type === 'emergency_button' || ticket.origin === 'EMERGENCY_BUTTON') ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300 border border-red-300 dark:border-red-800">
+                              <Radio size={10} className="animate-pulse text-red-600" />
+                              Pulsador PBS-33B
+                            </span>
+                          ) : ticket.type === 'fall' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                              <AlertTriangle size={10} />
+                              Caída Detectada
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="font-bold text-slate-800 dark:text-slate-200 text-xs">
                           {ticket.title || ticket.message}
                         </p>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-1 mt-0.5">
                           {ticket.description || ticket.message}
                         </p>
-                        {ticket.clinicalValue && (
-                          <span className="inline-block mt-1 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
-                            Valor origen: {ticket.clinicalValue}
-                          </span>
-                        )}
                       </td>
 
                       {/* Criticidad */}
@@ -985,7 +1139,24 @@ export default function AlertsPage() {
               </div>
             )}
 
-            {isNurse && !isAssignedNurseToTicket(selectedTicket) && (
+            {isEmergencySelectedTicket && isTicketUnassigned(selectedTicket) && (
+              <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 space-y-1.5 shadow-sm">
+                <div className="flex items-center gap-2 font-black text-rose-900 dark:text-rose-100 uppercase tracking-wider text-[11px]">
+                  <AlertTriangle size={15} className="text-rose-600 dark:text-rose-400" />
+                  <span>Aviso de Seguridad: Alerta de Botón de Emergencia Sin Asignar</span>
+                </div>
+                <p className="leading-relaxed">
+                  El paciente no cuenta con un enfermero activo asignado para el <strong>turno {selectedTicket.shiftType || 'actual'}</strong>. Por normativa asistencial, las emergencias del pulsador PBS-33B <strong>no se asignan a doctores ni administradores</strong> y únicamente pueden ser atendidas por personal de enfermería formalmente relacionado con el paciente en este turno.
+                </p>
+                {isAdmin && (
+                  <p className="text-[11px] font-bold text-rose-700 dark:text-rose-300 pt-0.5">
+                    Como Administrador, asigne un enfermero para este paciente y turno en el módulo Control de Personal.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {isNurse && !isAssignedNurseToTicket(selectedTicket) && !isTicketUnassigned(selectedTicket) && (
               <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2.5">
                 <Lock size={16} className="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
                 <div>
@@ -1118,6 +1289,19 @@ export default function AlertsPage() {
                   Conserva el responsable original e historial de transferencias. Seleccione al enfermero del turno entrante que asumirá la continuidad asistencial.
                 </p>
 
+                {/* Advertencia / Contexto de Asignación Asistencial para Emergencias */}
+                {isEmergencySelectedTicket && (
+                  <div className="p-2.5 rounded-xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-[11px] text-sky-800 dark:text-sky-200">
+                    <p className="font-bold flex items-center gap-1.5">
+                      <Radio size={13} className="text-red-500 animate-pulse" />
+                      <span>Alerta Originada por Pulsador de Emergencia PBS-33B</span>
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-slate-600 dark:text-slate-400">
+                      Regla asistencial (Regla 2): Únicamente puede transferirse a enfermeros con asignación activa sobre este paciente para el turno correspondiente. Doctores y administradores no pueden ser asignados.
+                    </p>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-[10px] font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">
@@ -1126,13 +1310,16 @@ export default function AlertsPage() {
                     <select
                       value={transferTargetNurseId}
                       onChange={e => setTransferTargetNurseId(e.target.value)}
-                      className="w-full p-2 rounded-xl border border-sky-300 dark:border-sky-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white font-bold"
+                      disabled={transferEligibleNurses.length === 0}
+                      className="w-full p-2 rounded-xl border border-sky-300 dark:border-sky-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white font-bold disabled:opacity-50"
                     >
-                      {availableNurses
-                        .filter(n => n.id !== user?.id)
-                        .map(n => (
+                      {transferEligibleNurses.length === 0 ? (
+                        <option value="">(Sin enfermeros asignados en turno)</option>
+                      ) : (
+                        transferEligibleNurses.map(n => (
                           <option key={n.id} value={n.id}>{n.fullName}</option>
-                        ))}
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -1142,7 +1329,20 @@ export default function AlertsPage() {
                     </label>
                     <select
                       value={transferTargetShift}
-                      onChange={e => setTransferTargetShift(e.target.value as ShiftType)}
+                      onChange={e => {
+                        const newShift = e.target.value as ShiftType
+                        setTransferTargetShift(newShift)
+                        // Pre-seleccionar enfermero disponible para el nuevo turno
+                        if (selectedTicket && (selectedTicket.type === 'emergency_button' || selectedTicket.origin === 'EMERGENCY_BUTTON')) {
+                          const asg = getAllPatientShiftAssignments().filter(
+                            a => (a.patientDeviceId === selectedTicket.deviceId || a.patientDeviceId === selectedTicket.patientId) &&
+                                 a.shiftType === newShift &&
+                                 a.active
+                          )
+                          const nId = asg.find(a => a.nurseId !== user?.id)?.nurseId || ''
+                          setTransferTargetNurseId(nId)
+                        }
+                      }}
                       className="w-full p-2 rounded-xl border border-sky-300 dark:border-sky-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-white font-bold"
                     >
                       <option value="matutino">Turno Matutino (07:00 - 15:00)</option>
@@ -1151,6 +1351,15 @@ export default function AlertsPage() {
                     </select>
                   </div>
                 </div>
+
+                {isEmergencySelectedTicket && transferEligibleNurses.length === 0 && (
+                  <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-800 dark:text-amber-200 font-medium flex items-start gap-2">
+                    <AlertCircle size={15} className="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Sin enfermeros asignados:</strong> No hay enfermeros activos asignados a este paciente en el <strong>turno {transferTargetShift}</strong>. Las alertas de emergencia del botón no pueden transferirse a personal sin asignación asistencial.
+                    </span>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-[10px] font-bold text-slate-700 dark:text-slate-300 uppercase mb-1">
@@ -1170,13 +1379,14 @@ export default function AlertsPage() {
                   <button
                     type="button"
                     onClick={() => setIsTransferModal(false)}
-                    className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100"
+                    className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 cursor-pointer"
                   >
                     Cancelar
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition-all shadow-sm"
+                    disabled={!transferTargetNurseId || transferEligibleNurses.length === 0}
+                    className="px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold transition-all shadow-sm cursor-pointer"
                   >
                     Registrar Transferencia
                   </button>

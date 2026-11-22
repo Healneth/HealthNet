@@ -7,7 +7,7 @@ import {
   Heart, Thermometer, AlertTriangle, Activity, User, TrendingUp, Calendar,
   Search, Bed, Layers, CheckCircle2, Wifi, Battery, Clock, Phone, Mail,
   HeartHandshake, ChevronRight, ShieldAlert, Check, ArrowLeft, Users, Sliders,
-  Stethoscope, FileDown, FileText, Loader2, ArrowLeftRight, History, RotateCcw, X
+  Stethoscope, FileDown, FileText, Loader2, ArrowLeftRight, History, RotateCcw, X, Radio
 } from 'lucide-react'
 import HeartRateChart from '../components/charts/HeartRateChart'
 import TempChart from '../components/charts/TempChart'
@@ -20,6 +20,7 @@ import { jsPDF } from 'jspdf'
 import html2canvas from 'html2canvas'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import { simulatorService } from '../services/simulator'
 
 interface HistoricalData {
   time: string
@@ -30,7 +31,26 @@ interface HistoricalData {
 export default function MonitoringPage() {
   const { user } = useAuth()
   const rawDevices = useDeviceStore(s => Object.values(s.devices))
-  const allAlerts = useDeviceStore(s => s.alerts)
+  const rawAlerts = useDeviceStore(s => s.alerts)
+  const devicesMap = useDeviceStore(s => s.devices)
+
+  // Reconciliación de alertas para asegurar que todas las alertas del pulsador o biométricas se reflejen
+  const allAlerts = useMemo(() => {
+    const map = new Map<string, any>()
+    rawAlerts.forEach(a => {
+      const key = a.eventId || a.folio || a.id
+      map.set(key, a)
+    })
+    Object.values(devicesMap).forEach(dev => {
+      (dev.alerts || []).forEach(a => {
+        const key = a.eventId || a.folio || a.id
+        if (!map.has(key)) {
+          map.set(key, a)
+        }
+      })
+    })
+    return Array.from(map.values())
+  }, [rawAlerts, devicesMap])
   const isNurse = user?.role === 'nurse'
 
   // Lista de usuarios para resolver datos de contacto del enfermero
@@ -130,10 +150,37 @@ export default function MonitoringPage() {
     setViewMode('detail')
   }
 
-  // Generación de registros históricos de pulso y temperatura para el paciente seleccionado
+  // Generación/obtención de registros históricos de pulso y temperatura para el paciente seleccionado.
+  // Regla de Oro: Si es un brazalete debidamente registrado en el sistema clínico (no simulador) y cuenta con lecturas,
+  // se muestran sus mediciones fidedignas recibidas de AWS IoT / base de datos sin falsificación de datos.
   const mockTrendData = useMemo((): HistoricalData[] => {
     if (!currentDevice) return []
 
+    const isSimulated = currentDevice.deviceId.startsWith('SIM-') ||
+      currentDevice.latest?.isSimulated === true ||
+      simulatorService.isRunning(currentDevice.deviceId)
+
+    // A) DISPOSITIVO REAL REGISTRADO: Usar el historial real acumulado (de AWS IoT o base de datos)
+    if (!isSimulated && currentDevice.history && currentDevice.history.length > 0) {
+      return currentDevice.history.map((t, idx) => {
+        const d = new Date(t.timestamp)
+        let label = ''
+        if (historyRange === 'hoy') {
+          label = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+        } else if (historyRange === 'semana') {
+          label = d.toLocaleDateString('es-ES', { weekday: 'short' })
+        } else {
+          label = `${d.getDate()}/${d.getMonth() + 1}`
+        }
+        return {
+          time: idx === currentDevice.history.length - 1 ? 'Ahora' : label,
+          bpm: Math.round(t.heartRate),
+          temp: parseFloat(t.temperature.toFixed(1)),
+        }
+      })
+    }
+
+    // B) BRAZALETE DE PRUEBA EN SIMULADOR (o dispositivo sin telemetría física aún):
     // Semilla determinista basada en el ID y nombre del paciente
     const seed = currentDevice.patientName.length + currentDevice.deviceId.length
     const pointsCount = historyRange === 'hoy' ? 24 : historyRange === 'semana' ? 7 : 30
@@ -535,6 +582,11 @@ export default function MonitoringPage() {
                       const profile: Partial<UserProfile> = patient.profile || {}
                       const devLatest = patient.latest
                       const hasActiveAlert = patient.alerts.some(a => !a.acknowledged)
+                      const hasEmergencyButtonAlert = allAlerts.some(
+                        a => (a.deviceId === patient.deviceId || a.patientId === patient.deviceId) &&
+                             (a.type === 'emergency_button' || a.origin === 'EMERGENCY_BUTTON') &&
+                             !a.acknowledged && a.status !== 'completado'
+                      )
                       const isHRAlert = devLatest && (devLatest.heartRate < 60 || devLatest.heartRate > 100)
                       const isTempAlert = devLatest && devLatest.temperature > 37.8
 
@@ -627,7 +679,12 @@ export default function MonitoringPage() {
 
                           {/* 7. Estado Clínico / Alertas */}
                           <td className="py-3.5 px-4">
-                            {hasActiveAlert ? (
+                            {hasEmergencyButtonAlert ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-red-600 text-white border border-red-500 text-[10px] font-black uppercase tracking-wider animate-bounce shadow-xs">
+                                <Radio size={11} className="animate-pulse" />
+                                ¡Pulsador SOS!
+                              </span>
+                            ) : hasActiveAlert ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400 border border-rose-200 dark:border-rose-800/40 text-[10px] font-black uppercase tracking-wider animate-pulse">
                                 <AlertTriangle size={11} />
                                 ¡Alerta Activa!
@@ -1259,6 +1316,13 @@ export default function MonitoringPage() {
                             >
                               <div className="space-y-1.5 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
+                                  {(alert.origin === 'EMERGENCY_BUTTON' || alert.type === 'emergency_button') && (
+                                    <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-red-600 text-white border border-red-500 shadow-xs flex items-center gap-1">
+                                      <Radio size={10} className="animate-pulse" />
+                                      Pulsador PBS-33B
+                                    </span>
+                                  )}
+
                                   <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider ${
                                     alert.criticality === 'CRITICA'
                                       ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 border border-red-200 dark:border-red-800/60'

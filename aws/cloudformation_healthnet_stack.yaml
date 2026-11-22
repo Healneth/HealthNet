@@ -1,0 +1,399 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HealthNet - Infraestructura Cloud Unificada (Cognito, RDS PostgreSQL, API Gateway, Lambda, IoT Core, SNS SMS, SES)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Entorno de despliegue.
+
+  DbUsername:
+    Type: String
+    Default: healthnet_admin
+    Description: Usuario administrador para la base de datos PostgreSQL en Amazon RDS.
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    Default: HealthNet2026Master!
+    Description: Contraseña maestra para la base de datos PostgreSQL.
+
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    Description: Almacenamiento asignado en GB para RDS PostgreSQL.
+
+  SenderEmail:
+    Type: String
+    Default: notificaciones@healthnet.click
+    Description: Correo verificado en Amazon SES para envío de alertas asistenciales.
+
+Resources:
+  # ─────────────────────────────────────────────────────────────
+  # 1. RED VIRTUAL (VPC, SUBREDES Y GRUPO DE SEGURIDAD)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-vpc-${Environment}'
+
+  HealthNetInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-igw-${Environment}'
+
+  HealthNetVpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref HealthNetVpc
+      InternetGatewayId: !Ref HealthNetInternetGateway
+
+  HealthNetPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref HealthNetVpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-public-subnet-1-${Environment}'
+
+  HealthNetPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref HealthNetVpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-public-subnet-2-${Environment}'
+
+  HealthNetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref HealthNetVpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-public-rt-${Environment}'
+
+  HealthNetDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: HealthNetVpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref HealthNetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref HealthNetInternetGateway
+
+  HealthNetSubnet1RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref HealthNetPublicSubnet1
+      RouteTableId: !Ref HealthNetRouteTable
+
+  HealthNetSubnet2RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref HealthNetPublicSubnet2
+      RouteTableId: !Ref HealthNetRouteTable
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. SEGURIDAD DE ACCESO A BASE DE DATOS Y SERVICIOS
+  # ─────────────────────────────────────────────────────────────
+  HealthNetDbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Acceso seguro al puerto 5432 de PostgreSQL en RDS'
+      VpcId: !Ref HealthNetVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-db-sg-${Environment}'
+
+  HealthNetDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Subredes para alta disponibilidad de PostgreSQL HealthNet'
+      SubnetIds:
+        - !Ref HealthNetPublicSubnet1
+        - !Ref HealthNetPublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-db-subnet-group-${Environment}'
+
+  # ─────────────────────────────────────────────────────────────
+  # 3. AMAZON RDS (POSTGRESQL 15)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetDatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub 'healthnet-db-${Environment}'
+      Engine: postgres
+      EngineVersion: '15.7'
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp3
+      DBName: healthnet_db
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref HealthNetDbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref HealthNetDbSecurityGroup
+      PubliclyAccessible: true
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'healthnet-db-instance-${Environment}'
+
+  # ─────────────────────────────────────────────────────────────
+  # 4. AWS COGNITO (USER POOL, APP CLIENT & IDENTITY POOL)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetCognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'healthnet-users-${Environment}'
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: phone_number
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+  HealthNetCognitoAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'healthnet-spa-client-${Environment}'
+      UserPoolId: !Ref HealthNetCognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+
+  HealthNetIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub 'healthnet_identity_pool_${Environment}'
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref HealthNetCognitoAppClient
+          ProviderName: !GetAtt HealthNetCognitoUserPool.ProviderName
+
+  # Roles IAM para Cognito Identity Pool
+  HealthNetCognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref HealthNetIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: HealthNetIotAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iot:Connect
+                  - iot:Subscribe
+                  - iot:Receive
+                  - iot:Publish
+                Resource: '*'
+
+  HealthNetIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref HealthNetIdentityPool
+      Roles:
+        authenticated: !GetAtt HealthNetCognitoAuthRole.Arn
+
+  # ─────────────────────────────────────────────────────────────
+  # 5. ROL IAM PARA AWS LAMBDA (RDS, IOT, SES, SNS SMS)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'healthnet-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: HealthNetServicesPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iot:Publish
+                  - iot:Receive
+                Resource: '*'
+
+  # ─────────────────────────────────────────────────────────────
+  # 6. AWS LAMBDA FUNCTION (PATIENTS API)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetPatientsApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'healthnet-patients-api-${Environment}'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt HealthNetLambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            return {
+              statusCode: 200,
+              headers: { 'Access-Control-Allow-Origin': '*' },
+              body: JSON.stringify({ message: 'HealthNet Lambda inicializada con éxito.' })
+            };
+          };
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt HealthNetDatabaseInstance.Endpoint.Address
+          DB_USER: !Ref DbUsername
+          DB_PASSWORD: !Ref DbPassword
+          DB_NAME: healthnet_db
+          DB_PORT: '5432'
+          SNS_ENABLED: 'true'
+          SES_SENDER_EMAIL: !Ref SenderEmail
+          USER_POOL_ID: !Ref HealthNetCognitoUserPool
+
+  # ─────────────────────────────────────────────────────────────
+  # 7. AMAZON API GATEWAY (REST API)
+  # ─────────────────────────────────────────────────────────────
+  HealthNetApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'healthnet-api-${Environment}'
+      Description: 'API REST Principal de la Plataforma Médica HealthNet'
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  HealthNetApiResourceProxy:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref HealthNetApiGateway
+      ParentId: !GetAtt HealthNetApiGateway.RootResourceId
+      PathPart: '{proxy+}'
+
+  HealthNetApiMethodProxy:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref HealthNetApiGateway
+      ResourceId: !Ref HealthNetApiResourceProxy
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HealthNetPatientsApiFunction.Arn}/invocations'
+
+  HealthNetApiMethodRoot:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref HealthNetApiGateway
+      ResourceId: !GetAtt HealthNetApiGateway.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HealthNetPatientsApiFunction.Arn}/invocations'
+
+  HealthNetApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HealthNetApiMethodProxy
+      - HealthNetApiMethodRoot
+    Properties:
+      RestApiId: !Ref HealthNetApiGateway
+      StageName: !Ref Environment
+
+  HealthNetLambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref HealthNetPatientsApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HealthNetApiGateway}/*/*/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: URL Endpoint de Amazon API Gateway para el frontend
+    Value: !Sub 'https://${HealthNetApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+
+  CognitoUserPoolId:
+    Description: ID del User Pool de AWS Cognito
+    Value: !Ref HealthNetCognitoUserPool
+
+  CognitoAppClientId:
+    Description: ID del App Client de AWS Cognito
+    Value: !Ref HealthNetCognitoAppClient
+
+  CognitoIdentityPoolId:
+    Description: ID del Identity Pool de AWS Cognito
+    Value: !Ref HealthNetIdentityPool
+
+  DatabaseEndpoint:
+    Description: Hostname de conexión para Amazon RDS PostgreSQL
+    Value: !GetAtt HealthNetDatabaseInstance.Endpoint.Address

@@ -258,6 +258,12 @@ export interface PatientShiftCoverage {
 // ──────────────────────────────────────────────
 // Telemetría enviada por el ESP32 / simulador
 // ──────────────────────────────────────────────
+export interface EmergencyButtonPayload {
+  pressed: boolean
+  eventId?: string
+  lastEventId?: string
+}
+
 export interface DeviceTelemetry {
   deviceId: string
   patientName?: string
@@ -265,6 +271,10 @@ export interface DeviceTelemetry {
   heartRate: number // bpm
   temperature: number // °C
   fallDetected: boolean
+  emergencyButtonPressed?: boolean
+  emergencyButton?: EmergencyButtonPayload
+  eventId?: string
+  eventType?: string
   batteryLevel?: number // 0-100 (opcional en telemetría de transmisión)
   isSimulated?: boolean
   accelerometer?: {
@@ -377,12 +387,14 @@ export interface AlertTracking {
 export interface Alert {
   id: string
   folio?: string
+  eventId?: string
+  origin?: 'SENSOR' | 'EMERGENCY_BUTTON' | 'FALL_DETECTION' | 'VITALS_THRESHOLD' | string
   deviceId: string
   patientId?: string
   patientName?: string
   roomNumber?: string
   floor?: string
-  type: 'fall' | 'high_hr' | 'low_hr' | 'high_temp' | 'disconnected' | 'threshold_pending' | string
+  type: 'fall' | 'high_hr' | 'low_hr' | 'high_temp' | 'disconnected' | 'threshold_pending' | 'emergency_button' | string
   title?: string
   description?: string
   criticality: 'BAJA' | 'MEDIA' | 'ALTA' | 'CRITICA' | TicketCriticality

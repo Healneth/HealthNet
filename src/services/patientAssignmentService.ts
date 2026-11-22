@@ -1,6 +1,8 @@
-import type { PatientShiftAssignment, PatientShiftCoverage, ShiftType, SystemUser, DeviceState } from '../types'
+import type { PatientShiftAssignment, PatientShiftCoverage, ShiftType, SystemUser, DeviceState, AuthUser } from '../types'
 import { getCurrentWeekMonday, getMondayOfDate, determineShiftFromTimestamp } from './shiftService'
 import { logAuditEvent } from '../utils/auditLogger'
+import { getSystemUsers } from './auth'
+import { AWS_CONFIG, isApiConfigured } from '../config/aws'
 
 const PATIENT_ASSIGNMENTS_STORAGE_KEY = 'healthnet_patient_shift_assignments'
 
@@ -204,20 +206,22 @@ function getInitialMockPatientAssignments(): PatientShiftAssignment[] {
 export function getAllPatientShiftAssignments(): PatientShiftAssignment[] {
   const initial = getInitialMockPatientAssignments()
   try {
-    const raw = localStorage.getItem(PATIENT_ASSIGNMENTS_STORAGE_KEY)
-    if (raw) {
-      const parsed: PatientShiftAssignment[] = JSON.parse(raw)
-      let updated = false
-      initial.forEach(initItem => {
-        if (!parsed.some(p => p.patientDeviceId === initItem.patientDeviceId && p.shiftType === initItem.shiftType && p.weekStartDate === initItem.weekStartDate)) {
-          parsed.push(initItem)
-          updated = true
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(PATIENT_ASSIGNMENTS_STORAGE_KEY)
+      if (raw) {
+        const parsed: PatientShiftAssignment[] = JSON.parse(raw)
+        let updated = false
+        initial.forEach(initItem => {
+          if (!parsed.some(p => p.patientDeviceId === initItem.patientDeviceId && p.shiftType === initItem.shiftType && p.weekStartDate === initItem.weekStartDate)) {
+            parsed.push(initItem)
+            updated = true
+          }
+        })
+        if (updated) {
+          saveAllPatientShiftAssignments(parsed)
         }
-      })
-      if (updated) {
-        saveAllPatientShiftAssignments(parsed)
+        return parsed
       }
-      return parsed
     }
   } catch (e) {
     console.error('[patientAssignmentService] Error cargando asignaciones:', e)
@@ -228,7 +232,9 @@ export function getAllPatientShiftAssignments(): PatientShiftAssignment[] {
 
 export function saveAllPatientShiftAssignments(assignments: PatientShiftAssignment[]): void {
   try {
-    localStorage.setItem(PATIENT_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignments))
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      localStorage.setItem(PATIENT_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignments))
+    }
   } catch (e) {
     console.error('[patientAssignmentService] Error guardando asignaciones:', e)
   }
@@ -421,6 +427,109 @@ export function withdrawPatientShiftAssignment(params: {
 }
 
 /**
+ * Consulta asignaciones territoriales paciente-enfermero desde AWS API Gateway (/patient-shift-assignments).
+ * Sincroniza el almacenamiento local de forma transparente.
+ */
+export async function fetchPatientAssignmentsFromApi(weekStartDate?: string): Promise<PatientShiftAssignment[]> {
+  if (isApiConfigured()) {
+    try {
+      const url = new URL(`${AWS_CONFIG.apiEndpoint}/patient-shift-assignments`)
+      if (weekStartDate) url.searchParams.set('weekStartDate', weekStartDate)
+      const res = await fetch(url.toString())
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data) && data.length > 0) {
+          const currentLocal = getAllPatientShiftAssignments()
+          const merged = [...currentLocal]
+          data.forEach((remote: any) => {
+            const idx = merged.findIndex(m => m.id === remote.id || (m.patientDeviceId === remote.patientDeviceId && m.shiftType === remote.shiftType && m.weekStartDate === remote.weekStartDate))
+            const formatted: PatientShiftAssignment = {
+              id: remote.id,
+              patientDeviceId: remote.patientDeviceId || remote.patient_device_id,
+              patientName: remote.patientName || remote.patient_name,
+              roomNumber: remote.roomNumber || remote.room_number || 'Hab. 101',
+              floor: remote.floor || 'Piso 1',
+              nurseId: remote.nurseId || remote.nurse_id,
+              nurseName: remote.nurseName || remote.nurse_name,
+              nurseEmail: remote.nurseEmail || remote.nurse_email,
+              shiftType: remote.shiftType || remote.shift_type,
+              weekStartDate: remote.weekStartDate || remote.week_start_date,
+              active: remote.active !== false,
+              assignedAt: remote.assignedAt || remote.assigned_at || new Date().toISOString(),
+              assignedByUserName: remote.assignedByUserName || remote.assigned_by_user_name || 'Administración',
+              withdrawnAt: remote.withdrawnAt || remote.withdrawn_at,
+              withdrawnReason: remote.withdrawnReason || remote.withdrawn_reason,
+            }
+            if (idx >= 0) {
+              merged[idx] = formatted
+            } else {
+              merged.push(formatted)
+            }
+          })
+          saveAllPatientShiftAssignments(merged)
+          return merged
+        }
+      }
+    } catch (e) {
+      console.warn('[patientAssignmentService] AWS API no disponible, usando asignaciones locales:', e)
+    }
+  }
+  return getAllPatientShiftAssignments()
+}
+
+/**
+ * Registra una asignación paciente-enfermero en AWS API Gateway y localmente.
+ */
+export async function assignPatientToNurseShiftApi(
+  params: Parameters<typeof assignPatientToNurseShift>[0],
+  user?: AuthUser | null
+): Promise<PatientShiftAssignment> {
+  const localSaved = assignPatientToNurseShift(params)
+  if (isApiConfigured()) {
+    try {
+      await fetch(`${AWS_CONFIG.apiEndpoint}/patient-shift-assignments`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Role': user?.role || 'admin',
+          'X-User-Id': user?.id || 'admin',
+        },
+        body: JSON.stringify(localSaved),
+      })
+    } catch (e) {
+      console.warn('[patientAssignmentService] Error sincronizando asignación con AWS API:', e)
+    }
+  }
+  return localSaved
+}
+
+/**
+ * Retira una asignación en AWS API Gateway y localmente.
+ */
+export async function withdrawPatientShiftAssignmentApi(
+  params: Parameters<typeof withdrawPatientShiftAssignment>[0],
+  user?: AuthUser | null
+): Promise<boolean> {
+  const ok = withdrawPatientShiftAssignment(params)
+  if (isApiConfigured()) {
+    try {
+      await fetch(`${AWS_CONFIG.apiEndpoint}/patient-shift-assignments/${params.assignmentId}/withdraw`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Role': user?.role || 'admin',
+          'X-User-Id': user?.id || 'admin',
+        },
+        body: JSON.stringify({ reason: params.reason }),
+      })
+    } catch (e) {
+      console.warn('[patientAssignmentService] Error retirando asignación en AWS API:', e)
+    }
+  }
+  return ok
+}
+
+/**
  * Calcula el resumen métrico de asignaciones para la vista principal
  */
 export function calculateAssignmentsOverview(
@@ -502,14 +611,19 @@ export function getActiveNurseForPatientShift(
   )
 
   if (assignment) {
-    return {
-      shiftType,
-      weekStartDate,
-      nurseId: assignment.nurseId,
-      nurseName: assignment.nurseName,
-      nurseEmail: assignment.nurseEmail,
-      assignmentId: assignment.id,
-      hasAssignedNurse: true,
+    // Validar que el usuario asignado sea exclusivamente un enfermero activo registrado (NO doctor, NO admin)
+    const systemUsers = getSystemUsers()
+    const nurseUser = systemUsers.find(u => u.id === assignment.nurseId)
+    if (nurseUser && nurseUser.role === 'nurse' && nurseUser.isActive) {
+      return {
+        shiftType,
+        weekStartDate,
+        nurseId: nurseUser.id,
+        nurseName: nurseUser.fullName || assignment.nurseName,
+        nurseEmail: nurseUser.email || assignment.nurseEmail,
+        assignmentId: assignment.id,
+        hasAssignedNurse: true,
+      }
     }
   }
 

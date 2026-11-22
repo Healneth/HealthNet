@@ -234,12 +234,12 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="h-screen w-screen max-h-screen overflow-hidden bg-[#F4F6F8] dark:bg-slate-950 flex items-center justify-center p-4 sm:p-6 lg:p-8 font-sans">
+    <div className="min-h-screen w-full overflow-y-auto bg-[#F4F6F8] dark:bg-slate-950 flex items-center justify-center p-4 sm:p-6 lg:p-8 py-8 font-sans">
       
       {/* ══════════════════════════════════════════════════════════════════
           TARJETA CONTENEDORA: PANTALLA DIVIDIDA 50/50
           ══════════════════════════════════════════════════════════════════ */}
-      <div className="w-full max-w-4xl xl:max-w-[960px] h-full max-h-[580px] xl:max-h-[620px] bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl shadow-slate-300/50 dark:shadow-black/70 border border-slate-200/80 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-2 overflow-hidden transition-colors">
+      <div className="w-full max-w-4xl xl:max-w-[960px] min-h-[540px] max-h-none lg:max-h-[620px] bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl shadow-slate-300/50 dark:shadow-black/70 border border-slate-200/80 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-2 overflow-hidden transition-colors my-auto">
         
         {/* ──────────────────────────────────────────────────────────────
             1. PANEL IZQUIERDO: VISUAL HERO (50% DEL ANCHO)

@@ -4,6 +4,8 @@
  * (en modo demo va directo al store; con AWS va por MQTT real).
  */
 import { iotService } from './iot'
+import { patientsService } from './patients'
+import { useDeviceStore } from '../store/deviceStore'
 import type { SimulatedDevice, DeviceTelemetry } from '../types'
 
 // ── Generadores de datos aleatorios ──────────────────────────────────
@@ -94,6 +96,53 @@ class SimulatorService {
     const device = this.devices.get(deviceId)
     if (!device) return
     iotService.publish(device.deviceId, generateTelemetry(device, true))
+  }
+
+  /**
+   * Dispara el evento del pulsador de emergencia físico/simulado PBS-33B.
+   * Utiliza el mismo flujo de procesamiento del dispositivo físico:
+   * 1. Publica en el tópico independiente 'healthnet/devices/{deviceId}/emergency' (solo deviceId y metadatos del evento).
+   * 2. Envía el evento al backend para validación estricta de brazalete, paciente y asignación de enfermero.
+   * 3. Si el brazalete no está registrado o no tiene paciente asociado, propaga el error clínico.
+   */
+  async triggerEmergencyButton(deviceId: string): Promise<any> {
+    const eventId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ev-${Date.now()}`
+
+    // 1. Publicación MQTT idéntica al firmware físico del ESP32 (sin datos arbitrarios del paciente)
+    iotService.publishEmergency(deviceId, {
+      deviceId,
+      timestamp: Date.now(),
+      emergencyButtonPressed: true,
+      emergencyButton: {
+        pressed: true,
+        eventId,
+      },
+      eventId,
+      eventType: 'EMERGENCY_BUTTON',
+      batteryLevel: 100,
+    })
+
+    // 2. Procesamiento centralizado en backend
+    try {
+      const backendResult = await patientsService.triggerEmergency(deviceId, eventId)
+      
+      // Sincronizar alerta confirmada con el store de forma inmediata
+      if (backendResult?.alert) {
+        useDeviceStore.getState().addAlert(backendResult.alert)
+      }
+
+      // Sincronización en segundo plano con BD protegida contra fallos de red
+      try {
+        await useDeviceStore.getState().loadPatientsFromDb()
+      } catch (syncErr) {
+        console.warn('[SimulatorService] Sincronización en segundo plano con BD no disponible:', syncErr)
+      }
+      
+      return backendResult
+    } catch (err) {
+      console.error(`[SimulatorService] Error al disparar emergencia para ${deviceId}:`, err)
+      throw err
+    }
   }
 
   getDevices(): SimulatedDevice[] {
