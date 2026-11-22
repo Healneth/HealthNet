@@ -144,7 +144,7 @@ export default function App() {
             <Route
               path="/simulator"
               element={
-                <ProtectedRoute allowedRoles={['admin', 'doctor']}>
+                <ProtectedRoute allowedRoles={['admin']}>
                   <Layout><SimulatorPage /></Layout>
                 </ProtectedRoute>
               }

@@ -5,6 +5,7 @@ import {
   X, Check, AlertTriangle, AlertCircle, ShieldAlert,
 } from 'lucide-react'
 import Logo from './Logo'
+import LogoutConfirmModal from './LogoutConfirmModal'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
 import type { Alert } from '../types'
@@ -39,6 +40,7 @@ export default function Navbar() {
   const navigate = useNavigate()
 
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [logoutModalOpen, setLogoutModalOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const unreadAlertsList = useDeviceStore(s => s.alerts.filter(a => !a.acknowledged))
@@ -62,12 +64,14 @@ export default function Navbar() {
     }
   }, [dropdownOpen])
 
+  // Solo rol 'admin' tiene acceso al simulador IoT (bloqueado para doctor y enfermero)
   const navLinks = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { to: '/simulator', label: 'Simulador', icon: Cpu },
+    ...(user?.role === 'admin' ? [{ to: '/simulator', label: 'Simulador', icon: Cpu }] : []),
   ]
 
-  const handleLogout = async () => {
+  const handleConfirmLogout = async () => {
+    setLogoutModalOpen(false)
     await signOut()
     navigate('/login')
   }
@@ -186,7 +190,7 @@ export default function Navbar() {
               <p className="text-[10px] text-hn-500 leading-none mt-0.5 capitalize">{user?.role}</p>
             </div>
             <button
-              onClick={handleLogout}
+              onClick={() => setLogoutModalOpen(true)}
               className="ml-1 p-1.5 rounded-lg hover:bg-red-50 hover:text-red-500 text-hn-500 transition-colors"
               title="Cerrar sesión"
             >
@@ -195,6 +199,15 @@ export default function Navbar() {
           </div>
         </div>
       </div>
+
+      {/* Modal de Confirmación de Cierre de Sesión */}
+      <LogoutConfirmModal
+        isOpen={logoutModalOpen}
+        onClose={() => setLogoutModalOpen(false)}
+        onConfirm={handleConfirmLogout}
+        userName={user?.fullName || user?.email}
+        userRole={user?.role}
+      />
     </nav>
   )
 }

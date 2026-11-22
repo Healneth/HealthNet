@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import Logo from './Logo'
 import ChangePasswordModal from './ChangePasswordModal'
+import LogoutConfirmModal from './LogoutConfirmModal'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
 import type { UserRole } from '../types'
@@ -26,6 +27,7 @@ export default function Sidebar() {
 
   const [mobileOpen, setMobileOpen] = useState(false)
   const [changePasswordOpen, setChangePasswordOpen] = useState(false)
+  const [logoutModalOpen, setLogoutModalOpen] = useState(false)
 
   // Store details
   const theme = useDeviceStore(s => s.theme)
@@ -34,7 +36,8 @@ export default function Sidebar() {
   const toggleSidebarCollapse = useDeviceStore(s => s.toggleSidebarCollapse)
   const unreadAlertsCount = useDeviceStore(s => s.alerts.filter(a => !a.acknowledged).length)
 
-  const handleLogout = async () => {
+  const handleConfirmLogout = async () => {
+    setLogoutModalOpen(false)
     await signOut()
     navigate('/login')
   }
@@ -82,7 +85,7 @@ export default function Sidebar() {
       to: '/simulator',
       label: 'Simulador IoT',
       icon: Cpu,
-      roles: ['admin', 'doctor'], // Oculto para Enfermeros
+      roles: ['admin'], // Restringido exclusivamente al Administrador (Bloqueado para Doctor y Enfermero)
     },
   ]
 
@@ -282,7 +285,7 @@ export default function Sidebar() {
 
             <div className="relative group">
               <button
-                onClick={handleLogout}
+                onClick={() => setLogoutModalOpen(true)}
                 className="p-2 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
                 title="Cerrar sesión"
               >
@@ -323,7 +326,7 @@ export default function Sidebar() {
                   <KeyRound size={15} />
                 </button>
                 <button
-                  onClick={handleLogout}
+                  onClick={() => setLogoutModalOpen(true)}
                   className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
                   title="Cerrar sesión"
                 >
@@ -379,6 +382,15 @@ export default function Sidebar() {
       <ChangePasswordModal
         isOpen={changePasswordOpen}
         onClose={() => setChangePasswordOpen(false)}
+      />
+
+      {/* Modal de Confirmación de Cierre de Sesión */}
+      <LogoutConfirmModal
+        isOpen={logoutModalOpen}
+        onClose={() => setLogoutModalOpen(false)}
+        onConfirm={handleConfirmLogout}
+        userName={user?.fullName || user?.email}
+        userRole={roleInfo.label}
       />
     </>
   )

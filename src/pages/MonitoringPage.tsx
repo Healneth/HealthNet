@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useDeviceStore } from '../store/deviceStore'
 import { useAuth } from '../hooks/useAuth'
 import { getSystemUsers } from '../services/auth'
+import TablePagination from '../components/TablePagination'
 import type { UserProfile } from '../types'
 import {
   Heart, Thermometer, AlertTriangle, Activity, User, TrendingUp, Calendar,
@@ -134,6 +135,20 @@ export default function MonitoringPage() {
       return matchesSearch && matchesGender && matchesFloor && matchesRoom && matchesAlerts
     })
   }, [devices, searchQuery, selectedGender, selectedFloor, selectedRoom, filterAlertsOnly])
+
+  // Paginación del directorio de pacientes monitoreados
+  const [patientsPage, setPatientsPage] = useState(1)
+  const [patientsPageSize, setPatientsPageSize] = useState(10)
+
+  // Reset a página 1 cuando cambian filtros o búsqueda
+  useEffect(() => {
+    setPatientsPage(1)
+  }, [searchQuery, selectedGender, selectedFloor, selectedRoom, filterAlertsOnly])
+
+  const paginatedPatients = useMemo(() => {
+    const start = (patientsPage - 1) * patientsPageSize
+    return filteredPatients.slice(start, start + patientsPageSize)
+  }, [filteredPatients, patientsPage, patientsPageSize])
 
   // Paciente actualmente seleccionado para la vista de métricas
   const currentDevice = devices.find(d => d.deviceId === selectedId) || devices[0]
@@ -578,7 +593,7 @@ export default function MonitoringPage() {
                       </td>
                     </tr>
                   ) : (
-                    filteredPatients.map(patient => {
+                    paginatedPatients.map(patient => {
                       const profile: Partial<UserProfile> = patient.profile || {}
                       const devLatest = patient.latest
                       const hasActiveAlert = patient.alerts.some(a => !a.acknowledged)
@@ -722,6 +737,21 @@ export default function MonitoringPage() {
                 </tbody>
               </table>
             </div>
+
+            {filteredPatients.length > 0 && (
+              <TablePagination
+                currentPage={patientsPage}
+                totalItems={filteredPatients.length}
+                pageSize={patientsPageSize}
+                onPageChange={setPatientsPage}
+                onPageSizeChange={newSize => {
+                  setPatientsPageSize(newSize)
+                  setPatientsPage(1)
+                }}
+                pageSizeOptions={[10, 30, 50, 100]}
+                itemName="pacientes monitoreados"
+              />
+            )}
           </div>
 
         </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { Navigate } from 'react-router-dom'
 import {
   PlusCircle, Play, Square, Zap, Trash2,
   Cpu, RefreshCw, AlertTriangle, ChevronDown, ChevronUp, Radio,
@@ -29,6 +30,13 @@ interface DeviceRow {
 
 export default function SimulatorPage() {
   const { user } = useAuth()
+
+  // Restricción estricta de acceso: Únicamente rol 'admin' puede interactuar con el simulador IoT.
+  // Usuarios con rol 'doctor' o 'nurse' son redirigidos inmediatamente al dashboard.
+  if (user && user.role !== 'admin') {
+    return <Navigate to="/dashboard" replace />
+  }
+
   const canDelete = user?.role === 'admin'
   const storeDevices = useDeviceStore(s => Object.values(s.devices))
   const removeDevice = useDeviceStore(s => s.removeDevice)

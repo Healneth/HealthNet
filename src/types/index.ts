@@ -89,7 +89,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canViewPatientGeneral: true,
     canViewAdvancedHistory: true,
     canManageUsers: false, // NO PUEDE administrar usuarios ni modificar roles
-    canSimulateIoT: true,
+    canSimulateIoT: false, // NO PUEDE acceder al simulador IoT (exclusivo para Administrador)
 
     canRegisterPatient: false, // NO PUEDE registrar pacientes (función exclusiva del Administrador)
     canDeletePatient: false, // NO PUEDE eliminar permanentemente pacientes o historiales

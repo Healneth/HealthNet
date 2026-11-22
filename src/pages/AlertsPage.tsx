@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import TablePagination from '../components/TablePagination'
 import type { Alert, TicketStatus, TicketCriticality, ShiftType } from '../types'
 
 export default function AlertsPage() {
@@ -59,6 +60,15 @@ export default function AlertsPage() {
   const [shiftFilter, setShiftFilter] = useState<'todos' | ShiftType>('todos')
   const [patientFilter, setPatientFilter] = useState<string>('todos')
   const [nurseFilter, setNurseFilter] = useState<string>('todos')
+
+  // Paginación y control de visualización de registros
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+
+  // Reiniciar a página 1 cuando se modifican los filtros o la búsqueda (evita registros omitidos o vacíos)
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, statusFilter, typeFilter, criticalityFilter, shiftFilter, patientFilter, nurseFilter])
 
   // Sincronizar automáticamente con query parameters (cuando se redirige desde Dashboard)
   useEffect(() => {
@@ -264,6 +274,12 @@ export default function AlertsPage() {
     })
   }, [alerts, devices, searchQuery, statusFilter, typeFilter, criticalityFilter, shiftFilter, patientFilter, nurseFilter, user, availableNurses])
 
+  // Registros paginados correspondientes a la página y tamaño actual
+  const paginatedTickets = useMemo(() => {
+    const start = (currentPage - 1) * pageSize
+    return filteredTickets.slice(start, start + pageSize)
+  }, [filteredTickets, currentPage, pageSize])
+
   // Ticket seleccionado actualmente
   const selectedTicket = useMemo(() => {
     if (!selectedTicketId) return null
@@ -445,6 +461,7 @@ export default function AlertsPage() {
     setShiftFilter('todos')
     setPatientFilter('todos')
     setNurseFilter('todos')
+    setCurrentPage(1)
     setSearchParams({})
   }
 
@@ -838,7 +855,7 @@ export default function AlertsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300 text-xs font-medium">
-                {filteredTickets.map(ticket => {
+                {paginatedTickets.map(ticket => {
                   const st = normalizeStatus(ticket)
                   const crit = normalizeCriticality(ticket)
                   const critBadge = getCriticalityBadge(crit)
@@ -995,6 +1012,22 @@ export default function AlertsPage() {
             </table>
           )}
         </div>
+
+        {/* Paginación y navegación de registros */}
+        {filteredTickets.length > 0 && (
+          <TablePagination
+            currentPage={currentPage}
+            totalItems={filteredTickets.length}
+            pageSize={pageSize}
+            onPageChange={setCurrentPage}
+            onPageSizeChange={newSize => {
+              setPageSize(newSize)
+              setCurrentPage(1)
+            }}
+            pageSizeOptions={[10, 30, 50, 100]}
+            itemName="tickets clínicos"
+          />
+        )}
       </div>
 
       {/* ───────────────────────────────────────────────────────── */}

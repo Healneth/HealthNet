@@ -522,11 +522,60 @@ exports.handler = async (event) => {
     }
 
     // ─────────────────────────────────────────────────────────
+    // SIMULADOR IOT (Restricción estricta RBAC en Backend)
+    // El simulador IoT está restringido exclusivamente al rol 'admin'.
+    // Usuarios con rol 'doctor' o 'nurse' tienen acceso estrictamente denegado (HTTP 403 Forbidden).
+    // ─────────────────────────────────────────────────────────
+    if (path.startsWith('/simulator')) {
+      if (callerRole !== 'admin') {
+        return {
+          statusCode: 403,
+          headers,
+          body: JSON.stringify({
+            error: 'Forbidden',
+            message: 'Acceso Denegado (RBAC): El simulador IoT está restringido exclusivamente a la Administración. Doctores y Enfermeros no tienen autorización para interactuar con el simulador ni emitir telemetría de prueba.'
+          })
+        };
+      }
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          status: 'ok',
+          authorizedRole: callerRole,
+          message: 'Acceso autorizado al simulador IoT para Administrador.'
+        })
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────
     // 1. PATIENTS ENDPOINTS (Nuevo Esquema Normalizado con RBAC)
     // ─────────────────────────────────────────────────────────
 
-    // GET /patients (list patients)
+    // GET /patients (list patients con soporte de paginación)
     if (httpMethod === 'GET' && !deviceId && path === '/patients') {
+      const qParams = event.queryStringParameters || {};
+      const pageParam = qParams.page ? parseInt(qParams.page) : null;
+      const limitParam = qParams.limit ? parseInt(qParams.limit) : null;
+
+      let baseFromWhere = `
+        FROM patients p
+        LEFT JOIN bracelets b ON p.id = b.patient_id
+        LEFT JOIN patient_thresholds t ON p.id = t.patient_id
+        LEFT JOIN users u ON p.assigned_nurse_id = u.id
+      `;
+
+      let queryParams = [];
+      // RBAC: Si es Enfermero, consultar ÚNICAMENTE sus pacientes asignados
+      if (callerRole === 'nurse') {
+        baseFromWhere += ` WHERE p.assigned_nurse_id::text = $1 OR LOWER(u.email) = LOWER($2) `;
+        queryParams = [callerUserId || 'a0000000-0000-0000-0000-000000000003', callerEmail];
+      }
+
+      let countQuery = `SELECT COUNT(p.id) as total ${baseFromWhere}`;
+      const countRes = await db.query(countQuery, queryParams);
+      const totalCount = parseInt(countRes.rows[0]?.total || '0');
+
       let query = `
         SELECT 
           p.id,
@@ -561,24 +610,44 @@ exports.handler = async (event) => {
           COALESCE(t.temp_max, 38.00) AS temp_max,
           COALESCE(t.notifications_active, true) AS notifications_active,
           COALESCE(t.watch_theme, 'dark') AS watch_theme
-        FROM patients p
-        LEFT JOIN bracelets b ON p.id = b.patient_id
-        LEFT JOIN patient_thresholds t ON p.id = t.patient_id
-        LEFT JOIN users u ON p.assigned_nurse_id = u.id
+        ${baseFromWhere}
+        ORDER BY p.full_name ASC
       `;
 
-      let queryParams = [];
-      // RBAC: Si es Enfermero, consultar ÚNICAMENTE sus pacientes asignados
-      if (callerRole === 'nurse') {
-        query += ` WHERE p.assigned_nurse_id::text = $1 OR LOWER(u.email) = LOWER($2) `;
-        queryParams = [callerUserId || 'a0000000-0000-0000-0000-000000000003', callerEmail];
+      if (pageParam && limitParam) {
+        const offset = Math.max(0, (pageParam - 1) * limitParam);
+        queryParams.push(limitParam);
+        query += ` LIMIT $${queryParams.length}`;
+        queryParams.push(offset);
+        query += ` OFFSET $${queryParams.length}`;
+      } else {
+        query += ` LIMIT 500`;
       }
 
-      query += ` ORDER BY p.full_name ASC;`;
       const result = await db.query(query, queryParams);
+      const resHeaders = {
+        ...headers,
+        'X-Total-Count': totalCount.toString()
+      };
+
+      if (pageParam) {
+        return {
+          statusCode: 200,
+          headers: resHeaders,
+          body: JSON.stringify({
+            data: result.rows,
+            items: result.rows,
+            total: totalCount,
+            page: pageParam,
+            limit: limitParam || result.rows.length,
+            totalPages: Math.ceil(totalCount / (limitParam || 1))
+          })
+        };
+      }
+
       return {
         statusCode: 200,
-        headers,
+        headers: resHeaders,
         body: JSON.stringify(result.rows)
       };
     }
@@ -1050,9 +1119,16 @@ exports.handler = async (event) => {
     // 2. ALERTS ENDPOINTS (Tickets y Criticidad con RBAC)
     // ─────────────────────────────────────────────────────────
 
-    // GET /alerts (Todos los roles, incluyendo enfermeros, visualizan todas las alertas clínicas)
+    // GET /alerts (con soporte de paginación)
     if (httpMethod === 'GET' && path === '/alerts') {
-      const query = `
+      const qParams = event.queryStringParameters || {};
+      const pageParam = qParams.page ? parseInt(qParams.page) : null;
+      const limitParam = qParams.limit ? parseInt(qParams.limit) : null;
+
+      const countRes = await db.query('SELECT COUNT(a.id) as total FROM alerts a');
+      const totalCount = parseInt(countRes.rows[0]?.total || '0');
+
+      let query = `
         SELECT 
           a.*,
           a.current_status,
@@ -1064,13 +1140,44 @@ exports.handler = async (event) => {
         FROM alerts a
         LEFT JOIN patients p ON a.patient_id = p.id
         LEFT JOIN users u ON p.assigned_nurse_id = u.id
-        ORDER BY a.created_at DESC LIMIT 500;
+        ORDER BY a.created_at DESC
       `;
 
-      const result = await db.query(query);
+      let queryParams = [];
+      if (pageParam && limitParam) {
+        const offset = Math.max(0, (pageParam - 1) * limitParam);
+        queryParams.push(limitParam);
+        query += ` LIMIT $${queryParams.length}`;
+        queryParams.push(offset);
+        query += ` OFFSET $${queryParams.length}`;
+      } else {
+        query += ` LIMIT 500`;
+      }
+
+      const result = await db.query(query, queryParams);
+      const resHeaders = {
+        ...headers,
+        'X-Total-Count': totalCount.toString()
+      };
+
+      if (pageParam) {
+        return {
+          statusCode: 200,
+          headers: resHeaders,
+          body: JSON.stringify({
+            data: result.rows,
+            items: result.rows,
+            total: totalCount,
+            page: pageParam,
+            limit: limitParam || result.rows.length,
+            totalPages: Math.ceil(totalCount / (limitParam || 1))
+          })
+        };
+      }
+
       return {
         statusCode: 200,
-        headers,
+        headers: resHeaders,
         body: JSON.stringify(result.rows)
       };
     }
@@ -1267,10 +1374,17 @@ exports.handler = async (event) => {
     // 2.B. SISTEMA DE TICKETS DE ALERTAS CLÍNICAS (v6.0)
     // ─────────────────────────────────────────────────────────
 
-    // GET /tickets
+    // GET /tickets (con soporte de paginación)
     if (httpMethod === 'GET' && path === '/tickets') {
       try {
-        const query = `
+        const qParams = event.queryStringParameters || {};
+        const pageParam = qParams.page ? parseInt(qParams.page) : null;
+        const limitParam = qParams.limit ? parseInt(qParams.limit) : null;
+
+        const countRes = await db.query('SELECT COUNT(t.id) as total FROM tickets t');
+        const totalCount = parseInt(countRes.rows[0]?.total || '0');
+
+        let query = `
           SELECT 
             t.*,
             COALESCE(
@@ -1286,12 +1400,44 @@ exports.handler = async (event) => {
               '[]'::json
             ) AS activity_log
           FROM tickets t
-          ORDER BY t.created_at DESC LIMIT 500;
+          ORDER BY t.created_at DESC
         `;
-        const result = await db.query(query);
+
+        let queryParams = [];
+        if (pageParam && limitParam) {
+          const offset = Math.max(0, (pageParam - 1) * limitParam);
+          queryParams.push(limitParam);
+          query += ` LIMIT $${queryParams.length}`;
+          queryParams.push(offset);
+          query += ` OFFSET $${queryParams.length}`;
+        } else {
+          query += ` LIMIT 500`;
+        }
+
+        const result = await db.query(query, queryParams);
+        const resHeaders = {
+          ...headers,
+          'X-Total-Count': totalCount.toString()
+        };
+
+        if (pageParam) {
+          return {
+            statusCode: 200,
+            headers: resHeaders,
+            body: JSON.stringify({
+              data: result.rows,
+              items: result.rows,
+              total: totalCount,
+              page: pageParam,
+              limit: limitParam || result.rows.length,
+              totalPages: Math.ceil(totalCount / (limitParam || 1))
+            })
+          };
+        }
+
         return {
           statusCode: 200,
-          headers,
+          headers: resHeaders,
           body: JSON.stringify(result.rows)
         };
       } catch (e) {
@@ -1693,10 +1839,48 @@ exports.handler = async (event) => {
         };
       }
 
-      const result = await db.query('SELECT id, role_id AS role, email, full_name, phone_number, is_active, suspended_at, suspended_by, suspended_reason, created_at FROM users ORDER BY full_name ASC');
+      const qParams = event.queryStringParameters || {};
+      const pageParam = qParams.page ? parseInt(qParams.page) : null;
+      const limitParam = qParams.limit ? parseInt(qParams.limit) : null;
+
+      const countRes = await db.query('SELECT COUNT(id) as total FROM users');
+      const totalCount = parseInt(countRes.rows[0]?.total || '0');
+
+      let query = 'SELECT id, role_id AS role, email, full_name, phone_number, is_active, suspended_at, suspended_by, suspended_reason, created_at FROM users ORDER BY full_name ASC';
+      let queryParams = [];
+
+      if (pageParam && limitParam) {
+        const offset = Math.max(0, (pageParam - 1) * limitParam);
+        queryParams.push(limitParam);
+        query += ` LIMIT $${queryParams.length}`;
+        queryParams.push(offset);
+        query += ` OFFSET $${queryParams.length}`;
+      }
+
+      const result = await db.query(query, queryParams);
+      const resHeaders = {
+        ...headers,
+        'X-Total-Count': totalCount.toString()
+      };
+
+      if (pageParam) {
+        return {
+          statusCode: 200,
+          headers: resHeaders,
+          body: JSON.stringify({
+            data: result.rows,
+            items: result.rows,
+            total: totalCount,
+            page: pageParam,
+            limit: limitParam || result.rows.length,
+            totalPages: Math.ceil(totalCount / (limitParam || 1))
+          })
+        };
+      }
+
       return {
         statusCode: 200,
-        headers,
+        headers: resHeaders,
         body: JSON.stringify(result.rows)
       };
     }
@@ -1966,10 +2150,50 @@ exports.handler = async (event) => {
         };
       }
 
-      const result = await db.query('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 200');
+      const qParams = event.queryStringParameters || {};
+      const pageParam = qParams.page ? parseInt(qParams.page) : null;
+      const limitParam = qParams.limit ? parseInt(qParams.limit) : null;
+
+      const countRes = await db.query('SELECT COUNT(id) as total FROM audit_log');
+      const totalCount = parseInt(countRes.rows[0]?.total || '0');
+
+      let query = 'SELECT * FROM audit_log ORDER BY created_at DESC';
+      let queryParams = [];
+
+      if (pageParam && limitParam) {
+        const offset = Math.max(0, (pageParam - 1) * limitParam);
+        queryParams.push(limitParam);
+        query += ` LIMIT $${queryParams.length}`;
+        queryParams.push(offset);
+        query += ` OFFSET $${queryParams.length}`;
+      } else {
+        query += ` LIMIT 200`;
+      }
+
+      const result = await db.query(query, queryParams);
+      const resHeaders = {
+        ...headers,
+        'X-Total-Count': totalCount.toString()
+      };
+
+      if (pageParam) {
+        return {
+          statusCode: 200,
+          headers: resHeaders,
+          body: JSON.stringify({
+            data: result.rows,
+            items: result.rows,
+            total: totalCount,
+            page: pageParam,
+            limit: limitParam || result.rows.length,
+            totalPages: Math.ceil(totalCount / (limitParam || 1))
+          })
+        };
+      }
+
       return {
         statusCode: 200,
-        headers,
+        headers: resHeaders,
         body: JSON.stringify(result.rows)
       };
     }

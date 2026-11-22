@@ -17,6 +17,7 @@ import { patientsService } from '../services/patients'
 import { logAuditEvent } from '../utils/auditLogger'
 import { useAuth } from '../hooks/useAuth'
 import { useDeviceStore } from '../store/deviceStore'
+import TablePagination from '../components/TablePagination'
 import type { SystemUser, UserRole, DeviceState, ShiftType, ShiftConfig, NurseShiftAssignment, PatientShiftAssignment } from '../types'
 import {
   getShiftConfigs,
@@ -949,6 +950,20 @@ export default function UsersManagementPage() {
     return matchesSearch && matchesRole && matchesStatus
   })
 
+  // Paginación de Usuarios
+  const [usersPage, setUsersPage] = useState(1)
+  const [usersPageSize, setUsersPageSize] = useState(10)
+
+  // Reset a página 1 al modificar búsqueda o filtros
+  useEffect(() => {
+    setUsersPage(1)
+  }, [search, roleFilter, statusFilter])
+
+  const paginatedUsers = useMemo(() => {
+    const start = (usersPage - 1) * usersPageSize
+    return filteredUsers.slice(start, start + usersPageSize)
+  }, [filteredUsers, usersPage, usersPageSize])
+
   const getRoleBadge = (r: UserRole) => {
     switch (r) {
       case 'admin':
@@ -1406,7 +1421,7 @@ export default function UsersManagementPage() {
                       </td>
                     </tr>
                   ) : (
-                    filteredUsers.map(userItem => {
+                    paginatedUsers.map(userItem => {
                       const badge = getRoleBadge(userItem.role)
                       const RoleIcon = badge.icon
 
@@ -1549,6 +1564,21 @@ export default function UsersManagementPage() {
                 </tbody>
               </table>
             </div>
+
+            {filteredUsers.length > 0 && (
+              <TablePagination
+                currentPage={usersPage}
+                totalItems={filteredUsers.length}
+                pageSize={usersPageSize}
+                onPageChange={setUsersPage}
+                onPageSizeChange={newSize => {
+                  setUsersPageSize(newSize)
+                  setUsersPage(1)
+                }}
+                pageSizeOptions={[10, 30, 50, 100]}
+                itemName="usuarios registrados"
+              />
+            )}
           </div>
         </div>
       )}
