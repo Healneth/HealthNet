@@ -145,7 +145,8 @@ class PatientsService {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const data: ApiPatient[] = await response.json()
+      const json = await response.json()
+      const data: ApiPatient[] = Array.isArray(json) ? json : (json.data || json.items || [])
       return data.map(mapDbPatientToState)
     } catch (err) {
       console.warn('[PatientsService] Conexión con catálogo de pacientes en la nube no disponible o modo local:', err)
@@ -166,9 +167,10 @@ class PatientsService {
     }
 
     try {
+      const isUuid = (v?: string) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim())
       const payload = {
         deviceId,
-        id: profile.id,
+        id: isUuid(profile.id) ? profile.id : undefined,
         name: profile.name,
         full_name: profile.name,
         age: profile.age,
@@ -184,7 +186,7 @@ class PatientsService {
         floor: profile.floor,
         bedNumber: profile.bedNumber,
         bed_number: profile.bedNumber,
-        assigned_nurse_id: profile.assignedNurseId,
+        assigned_nurse_id: isUuid(profile.assignedNurseId) ? profile.assignedNurseId : undefined,
         assigned_nurse_name: profile.assignedNurseName,
         medicalNotes: profile.medicalNotes,
         isArchived: profile.isArchived ?? false,

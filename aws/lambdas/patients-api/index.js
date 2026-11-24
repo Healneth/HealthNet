@@ -741,11 +741,12 @@ exports.handler = async (event) => {
       }
 
       // Validar si el paciente ya existe
-      let existingPatientId = body.id;
+      const isUuid = (val) => typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+      let existingPatientId = (body.id && isUuid(body.id)) ? body.id.trim() : null;
       let existingRecord = null;
       if (!existingPatientId) {
         const checkBrace = await db.query('SELECT patient_id FROM bracelets WHERE device_id = $1', [targetDeviceId]);
-        if (checkBrace.rows.length > 0 && checkBrace.rows[0].patient_id) {
+        if (checkBrace.rows.length > 0 && checkBrace.rows[0].patient_id && isUuid(checkBrace.rows[0].patient_id)) {
           existingPatientId = checkBrace.rows[0].patient_id;
         }
       }
@@ -754,6 +755,8 @@ exports.handler = async (event) => {
         const checkPatient = await db.query('SELECT * FROM patients WHERE id = $1', [existingPatientId]);
         if (checkPatient.rows.length > 0) {
           existingRecord = checkPatient.rows[0];
+        } else {
+          existingPatientId = null;
         }
       }
 
@@ -881,6 +884,9 @@ exports.handler = async (event) => {
             const archivedReasonVal = body.archivedReason || body.archived_reason || null;
             const archivedByVal = body.archivedBy || body.archived_by || callerEmail;
 
+            const rawNurseId = body.assigned_nurse_id || body.assignedNurseId;
+            const assignedNurseUuid = (rawNurseId && isUuid(rawNurseId)) ? rawNurseId.trim() : null;
+
             await db.query(`
               UPDATE patients SET
                 full_name = $1,
@@ -905,7 +911,7 @@ exports.handler = async (event) => {
               body.phone || body.contact_phone || null,
               body.roomNumber || body.room_number || null,
               body.floor || null,
-              body.assigned_nurse_id || body.assignedNurseId || null,
+              assignedNurseUuid,
               patientId,
               isArchivedVal,
               archivedByVal,
@@ -940,6 +946,9 @@ exports.handler = async (event) => {
             };
           }
 
+          const rawNurseId = body.assigned_nurse_id || body.assignedNurseId;
+          const assignedNurseUuid = (rawNurseId && isUuid(rawNurseId)) ? rawNurseId.trim() : null;
+
           const insPatient = await db.query(`
             INSERT INTO patients (full_name, gender, room_number, floor, bed_number, contact_name, contact_phone, assigned_nurse_id, weight_kg, height_cm)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -952,9 +961,9 @@ exports.handler = async (event) => {
             body.bedNumber || body.bed_number || 'Cama 1',
             body.contactName || body.contact_name || body.emergencyContact || 'Familiar Responsable',
             body.phone || body.contact_phone || '—',
-            body.assigned_nurse_id || body.assignedNurseId || null,
-            null,
-            null
+            assignedNurseUuid,
+            parsedWeight,
+            parsedHeight
           ]);
           patientId = insPatient.rows[0].id;
 
